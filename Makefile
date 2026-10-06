@@ -7,17 +7,22 @@ BUILD_DIR := build
 TEST_DIR  := tests
 HEADERS   := $(wildcard include/*.h)
 
-# Every tests/*_tests.c file is a test program (it has its own main)
 TEST_SRCS := $(wildcard $(TEST_DIR)/*_tests.c)
 TEST_BINS := $(patsubst $(TEST_DIR)/%.c,$(BUILD_DIR)/$(TEST_DIR)/%,$(TEST_SRCS))
 
 .DEFAULT_GOAL := test-all
 .PHONY: test-all clean
 
-# Build one test binary: tests/X_tests.c + src/X.c
-# If a test needs another module, add its source as an extra prerequisite:
-#   $(BUILD_DIR)/$(TEST_DIR)/parser_tests: src/protocol.c
-$(BUILD_DIR)/$(TEST_DIR)/%_tests: $(TEST_DIR)/%_tests.c src/%.c $(HEADERS)
+# ---------- Sources needed by each test program ----------
+# One line per tests/<name>.c file. If the protocol is tested split by module
+# later, add one line per new test file with only the sources it needs.
+PROTOCOL_SRCS := src/crc16.c src/frame.c src/parser.c src/message.c
+
+$(BUILD_DIR)/$(TEST_DIR)/protocol_tests: $(PROTOCOL_SRCS)
+
+# ---------- Rules ----------
+# Build any test program: tests/<name>.c + the sources listed above
+$(BUILD_DIR)/$(TEST_DIR)/%: $(TEST_DIR)/%.c $(HEADERS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(SANFLAGS) $(filter %.c,$^) -o $@
 
@@ -31,7 +36,7 @@ test-all: $(TEST_BINS)
 	if [ $$fail -eq 0 ]; then echo "ALL TEST PROGRAMS PASSED"; \
 	else echo "SOME TEST PROGRAMS FAILED"; exit 1; fi
 
-# Run a single module: make test-protocol
+# Run a single test program: make test-protocol  (runs tests/protocol_tests.c)
 test-%: $(BUILD_DIR)/$(TEST_DIR)/%_tests
 	./$<
 
