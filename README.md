@@ -34,13 +34,13 @@ Solicitud de calibración con tick de 10 ms (`LOAD` = `0A 00`):
 
     7E | 00 | 02 | 0A 00 | 6B 05
 
-| Campo      | Valor   | Descripción                                   |
-| ---------- | ------- | --------------------------------------------- |
-| START_MARK | `7E`    | inicio de trama                               |
-| TYPE       | `00`    | solicitud de calibración                      |
-| LOAD_LEN   | `02`    | el `LOAD` ocupa 2 bytes                       |
-| LOAD       | `0A 00` | `tick_ms = 10` como `uint16` en little-endian |
-| CRC        | `6B 05` | CRC = `0x056B` enviado byte bajo primero      |
+| Campo      | Valor   | Descripción                                    |
+| ---------- | ------- | ---------------------------------------------- |
+| START_MARK | `7E`    | inicio de trama                                |
+| TYPE       | `00`    | solicitud de calibración                       |
+| LOAD_LEN   | `02`    | el `LOAD` ocupa 2 bytes                        |
+| LOAD       | `0A 00` | `tick_ms = 10` como `uint16` (`little-endian`) |
+| CRC        | `6B 05` | CRC = `0x056B` (`little-endian`)               |
 
 ### Contenido (LOAD) de cada mensaje
 

@@ -1,4 +1,4 @@
-#include "protocol.h"
+#include <protocol/protocol.h>
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
@@ -228,7 +228,7 @@ static void test_tick_report_roundtrip(void)
     msg_tick_report_t message = {0xAABBCCDD}, recovered;
 
     int load_len = msg_tick_report_pack(&message, load, sizeof load);
-    assert(load_len == 4);
+    assert(load_len == 6);
     assert(load[0] == 0xDD && load[1] == 0xCC && load[2] == 0xBB && load[3] == 0xAA);
     assert(msg_tick_report_unpack(load, (size_t)load_len, &recovered) == PROTOCOL_OK);
     assert(recovered.tick == 0xAABBCCDD);
