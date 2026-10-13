@@ -45,9 +45,9 @@ $(HOST_BIN): $(HOST_SRC) $(LIB_PROTOCOL) $(HEADERS)
 host: $(HOST_BIN)
 
 # ---------- Tests Rules ----------
-$(BUILD_DIR)/$(TEST_DIR)/%: $(TEST_DIR)/%.c $(LIB_PROTOCOL) $(HEADERS)
+$(BUILD_DIR)/$(TEST_DIR)/%: $(TEST_DIR)/%.c src/host/node_driver.c src/host/ring_buffer.c $(LIB_PROTOCOL) $(HEADERS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(SANFLAGS) $< -L$(LIB_DIR) -lprotocol -o $@
+	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< src/host/node_driver.c src/host/ring_buffer.c -L$(LIB_DIR) -lprotocol -o $@
 
 # Run every test and report a summary
 test-all: $(TEST_BINS)

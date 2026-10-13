@@ -3,21 +3,7 @@
 #include <string.h>
 #include <assert.h>
 
-/* ---------------------------------------------------------------------------
- * Test harness
- *
- * Every test is a function with no arguments. A failed assert() aborts the
- * program and reports the file and line, so the name printed by RUN_TEST is
- * the last one on screen when something breaks.
- * ------------------------------------------------------------------------- */
-#define RUN_TEST(test)            \
-    do                            \
-    {                             \
-        printf("  %-52s", #test); \
-        fflush(stdout);           \
-        test();                   \
-        puts("OK");               \
-    } while (0)
+#include "test_harness.h"
 
 /** Feeds n bytes to the parser and returns the result of the last byte. */
 static int feed_bytes(protocol_parser_t *parser, const uint8_t *bytes, size_t n,

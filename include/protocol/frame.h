@@ -26,9 +26,9 @@
 /** A received frame whose CRC has already been verified. */
 typedef struct
 {
-    uint8_t type;
-    uint8_t load_len;
-    uint8_t load[PROTOCOL_MAX_LOAD_SIZE];
+    uint8_t type;                         /**< Message type identifier. */
+    uint8_t load_len;                     /**< Length of the payload data in bytes. */
+    uint8_t load[PROTOCOL_MAX_LOAD_SIZE]; /**< Raw payload data buffer. */
 } protocol_frame_t;
 
 /**

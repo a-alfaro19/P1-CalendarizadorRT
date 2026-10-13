@@ -42,15 +42,15 @@ typedef enum
 /** Task kind (msg_task_deploy_t.kind). */
 enum
 {
-    TASK_PERIODIC = 0,
-    TASK_SPORADIC = 1
+    TASK_PERIODIC = 0, /**< Periodic task execution. */
+    TASK_SPORADIC = 1  /**< Sporadic task execution. */
 };
 
 /** Scheduling algorithm (msg_start_t.algorithm). */
 enum
 {
-    ALGORITHM_RMS = 0,
-    ALGORITHM_EDF = 1
+    ALGORITHM_RMS = 0, /**< Rate Monotonic Scheduling (RMS) algorithm. */
+    ALGORITHM_EDF = 1  /**< Earliest Deadline First (EDF) algorithm. */
 };
 
 /** Event type (msg_event_t.event_type). */
