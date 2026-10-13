@@ -1,0 +1,8 @@
+algorithm=RMS
+heuristic=WORST_FIT
+tick_ms=10
+node1_port=/dev/ttyUSB0
+node2_port=/dev/ttyACM0
+tick_report_period=10
+max_missed_reports=3
+task_file=data/tasks.txt
