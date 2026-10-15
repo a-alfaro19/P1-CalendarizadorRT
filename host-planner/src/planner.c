@@ -3,337 +3,262 @@
 
 #include "admission.h"
 #include "planner.h"
-#include "task_parser.h"
 
-/* Carga temporal de un nodo durante la planificacion */
-typedef struct
+int planner_find_task(const PlannerState *state, int task_id)
 {
-    Task tasks[MAX_TASKS];
-    int costs[MAX_TASKS];
-    int count;
-} NodeLoad;
+    if (state == NULL)
+        return -1;
 
-/* Busca el nodo con mayor velocidad de calibracion */
-static int find_fastest_node(const NodeInfo nodes[], int node_count)
-{
-    int fastest = 0;
-
-    for (int i = 1; i < node_count; i++)
-    {
-        if (nodes[i].speed_ut_per_tick > nodes[fastest].speed_ut_per_tick)
-        {
-            fastest = i;
-        }
-    }
-
-    return fastest;
-}
-
-/*
- * Ordena indices de tareas de mayor a menor utilizacion medida en el nodo
- * mas rapido
- */
-static void build_task_order(const Task tasks[],
-                             int task_count,
-                             int fastest_speed,
-                             int order[])
-{
-    for (int i = 0; i < task_count; i++)
-    {
-        order[i] = i;
-    }
-
-    /* Se usa selection sort porque es simple de leer y suficiente para MAX_TASKS=100. */
-    for (int i = 0; i < task_count - 1; i++)
-    {
-        int best = i;
-
-        for (int j = i + 1; j < task_count; j++)
-        {
-            int cost_best = task_cost_ticks(&tasks[order[best]], fastest_speed);
-            int cost_candidate = task_cost_ticks(&tasks[order[j]], fastest_speed);
-
-            double util_best = task_utilization(&tasks[order[best]], cost_best);
-            double util_candidate = task_utilization(&tasks[order[j]], cost_candidate);
-
-            /*
-             * Para mejor criterio fijo se escoge el de
-             * mayor criticidad primero y luego menor id
-             */
-            if (util_candidate > util_best ||
-                (util_candidate == util_best &&
-                 tasks[order[j]].criticality > tasks[order[best]].criticality) ||
-                (util_candidate == util_best &&
-                 tasks[order[j]].criticality == tasks[order[best]].criticality &&
-                 tasks[order[j]].id < tasks[order[best]].id))
-            {
-                best = j;
-            }
-        }
-
-        if (best != i)
-        {
-            int temp = order[i];
-            order[i] = order[best];
-            order[best] = temp;
-        }
-    }
-}
-
-/* Prueba una tarea candidata */
-static int candidate_is_admissible(const NodeLoad *load,
-                                   const Task *candidate,
-                                   int candidate_cost,
-                                   SchedulingAlgorithm algorithm)
-{
-    Task temp_tasks[MAX_TASKS];
-    int temp_costs[MAX_TASKS];
-
-    if (load->count >= MAX_TASKS)
-    {
-        return 0;
-    }
-
-    for (int i = 0; i < load->count; i++)
-    {
-        temp_tasks[i] = load->tasks[i];
-        temp_costs[i] = load->costs[i];
-    }
-
-    temp_tasks[load->count] = *candidate;
-    temp_costs[load->count] = candidate_cost;
-
-    return is_admissible(algorithm,
-                         temp_tasks,
-                         temp_costs,
-                         load->count + 1);
-}
-
-static double node_utilization(const NodeLoad *load)
-{
-    return total_utilization(load->tasks, load->costs, load->count);
-}
-
-/* First-Fit: nodos de mayor a menor velocidad y toma el primero que admite */
-static int choose_first_fit(const Task *task,
-                            const NodeInfo nodes[],
-                            int node_count,
-                            const NodeLoad loads[],
-                            SchedulingAlgorithm algorithm)
-{
-    int node_order[MAX_NODES];
-
-    for (int i = 0; i < node_count; i++)
-    {
-        node_order[i] = i;
-    }
-
-    for (int i = 0; i < node_count - 1; i++)
-    {
-        for (int j = i + 1; j < node_count; j++)
-        {
-            if (nodes[node_order[j]].speed_ut_per_tick >
-                nodes[node_order[i]].speed_ut_per_tick)
-            {
-                int temp = node_order[i];
-                node_order[i] = node_order[j];
-                node_order[j] = temp;
-            }
-        }
-    }
-
-    for (int i = 0; i < node_count; i++)
-    {
-        int node_index = node_order[i];
-        int cost = task_cost_ticks(task, nodes[node_index].speed_ut_per_tick);
-
-        if (candidate_is_admissible(&loads[node_index],
-                                    task,
-                                    cost,
-                                    algorithm))
-        {
-            return node_index;
-        }
-    }
+    for (int i = 0; i < state->node_count; i++)
+        for (int j = 0; j < state->nodes[i].task_count; j++)
+            if (state->nodes[i].tasks[j].id == task_id)
+                return i;
 
     return -1;
 }
 
-/*
- * Worst-Fit: entre los nodos admisibles escoge el que quede con mayor
- * capacidad libre despues de agregar la tarea
- */
-static int choose_worst_fit(const Task *task,
-                            const NodeInfo nodes[],
-                            int node_count,
-                            const NodeLoad loads[],
-                            SchedulingAlgorithm algorithm)
+double planner_node_utilization(const PlannerState *state, int node_index)
 {
-    int selected = -1;
-    double best_free_capacity = -1.0;
+    if (state == NULL || node_index < 0 || node_index >= state->node_count)
+        return -1.0;
 
-    for (int i = 0; i < node_count; i++)
+    const NodePlan *node = &state->nodes[node_index];
+    return total_utilization(node->tasks, node->costs, node->task_count);
+}
+
+/*
+ * Prueba una tarea contra la carga actual de un nodo sin cambiarla
+ * Si la prueba pasa, planner_add_task() la agrega
+ */
+static int node_accepts_task(const PlannerState *state,
+                             int node_index,
+                             const Task *task,
+                             int *cost_out,
+                             double *util_out)
+{
+    const NodePlan *node = &state->nodes[node_index];
+
+    if (!node->info.active || node->task_count >= MAX_TASKS_PER_NODE)
+        return 0;
+
+    int cost = task_cost_ticks(task, node->info.speed_ut_per_tick);
+    if (cost <= 0)
+        return 0;
+
+    Task temp_tasks[MAX_TASKS_PER_NODE];
+    int temp_costs[MAX_TASKS_PER_NODE];
+
+    for (int i = 0; i < node->task_count; i++)
     {
-        int cost = task_cost_ticks(task, nodes[i].speed_ut_per_tick);
+        temp_tasks[i] = node->tasks[i];
+        temp_costs[i] = node->costs[i];
+    }
 
-        if (!candidate_is_admissible(&loads[i], task, cost, algorithm))
+    temp_tasks[node->task_count] = *task;
+    temp_costs[node->task_count] = cost;
+
+    if (!is_admissible(state->algorithm,
+                       temp_tasks,
+                       temp_costs,
+                       node->task_count + 1))
+        return 0;
+
+    if (cost_out != NULL)
+        *cost_out = cost;
+    if (util_out != NULL)
+        *util_out = task_utilization(task, cost);
+    return 1;
+}
+
+/* First-Fit: revisa primero los nodos de mayor velocidad */
+static int choose_first_fit(const PlannerState *state,
+                            const Task *task,
+                            int *selected_cost,
+                            double *selected_util)
+{
+    int order[MAX_NODES];
+    for (int i = 0; i < state->node_count; i++)
+        order[i] = i;
+
+    for (int i = 0; i < state->node_count - 1; i++)
+        for (int j = i + 1; j < state->node_count; j++)
+            if (state->nodes[order[j]].info.speed_ut_per_tick >
+                state->nodes[order[i]].info.speed_ut_per_tick)
+            {
+                int tmp = order[i];
+                order[i] = order[j];
+                order[j] = tmp;
+            }
+
+    for (int i = 0; i < state->node_count; i++)
+    {
+        int idx = order[i], cost;
+        double util;
+        if (node_accepts_task(state, idx, task, &cost, &util))
         {
-            continue;
+            *selected_cost = cost;
+            *selected_util = util;
+            return idx;
         }
+    }
+    return -1;
+}
 
-        double current_utilization = node_utilization(&loads[i]);
-        double task_util = task_utilization(task, cost);
-        double free_capacity = 1.0 - (current_utilization + task_util);
+/* Worst-Fit: escoge el nodo admisible que quede con mas capacidad libre */
+static int choose_worst_fit(const PlannerState *state,
+                            const Task *task,
+                            int *selected_cost,
+                            double *selected_util)
+{
+    int selected = -1, best_cost = -1;
+    double best_util = 0.0, best_free = -1.0;
 
-        /* Desempate: se prefiere el nodo mas rapido */
-        if (selected == -1 ||
-            free_capacity > best_free_capacity ||
-            (free_capacity == best_free_capacity &&
-             nodes[i].speed_ut_per_tick > nodes[selected].speed_ut_per_tick))
+    for (int i = 0; i < state->node_count; i++)
+    {
+        int cost;
+        double util;
+        if (!node_accepts_task(state, i, task, &cost, &util))
+            continue;
+
+        double free_capacity = 1.0 - (planner_node_utilization(state, i) + util);
+
+        if (selected == -1 || free_capacity > best_free)
         {
             selected = i;
-            best_free_capacity = free_capacity;
+            best_cost = cost;
+            best_util = util;
+            best_free = free_capacity;
         }
     }
 
+    if (selected >= 0)
+    {
+        *selected_cost = best_cost;
+        *selected_util = best_util;
+    }
     return selected;
 }
 
-static void add_to_node_load(NodeLoad *load, const Task *task, int cost)
+int planner_init(PlannerState *state,
+                 const NodeInfo nodes[],
+                 int node_count,
+                 const Config *config)
 {
-    load->tasks[load->count] = *task;
-    load->costs[load->count] = cost;
-    load->count++;
-}
-
-int plan_tasks(const Task tasks[],
-               int task_count,
-               const NodeInfo nodes[],
-               int node_count,
-               const Config *config,
-               TaskAssignment assignments[])
-{
-    if (tasks == NULL || nodes == NULL || config == NULL ||
-        assignments == NULL || task_count < 0 || task_count > MAX_TASKS ||
+    if (state == NULL || nodes == NULL || config == NULL ||
         node_count <= 0 || node_count > MAX_NODES)
-    {
         return -1;
-    }
+
+    memset(state, 0, sizeof(*state));
+    state->node_count = node_count;
+    state->algorithm = config->algorithm;
+    state->heuristic = config->heuristic;
 
     for (int i = 0; i < node_count; i++)
     {
         if (nodes[i].speed_ut_per_tick <= 0)
-        {
             return -1;
-        }
+        state->nodes[i].info = nodes[i];
+    }
+    return 0;
+}
+
+int planner_add_task(PlannerState *state,
+                     const Task *task,
+                     TaskAssignment *assignment)
+{
+    if (state == NULL || task == NULL || assignment == NULL)
+        return -1;
+
+    assignment->task_id = task->id;
+    assignment->accepted = 0;
+    assignment->node_id = -1;
+    assignment->cost_ticks = -1;
+    assignment->utilization = 0.0;
+
+    /* No se permiten dos tareas con el mismo id. */
+    if (planner_find_task(state, task->id) >= 0)
+    {
+        snprintf(assignment->reason, REJECTION_REASON_LENGTH,
+                 "Ya existe una tarea con ese id");
+        return 0;
     }
 
-    NodeLoad loads[MAX_NODES] = {0};
-    int order[MAX_TASKS];
+    int cost = -1, selected = -1;
+    double util = 0.0;
 
-    int fastest_node = find_fastest_node(nodes, node_count);
-    build_task_order(tasks,
-                     task_count,
-                     nodes[fastest_node].speed_ut_per_tick,
-                     order);
+    if (state->heuristic == HEURISTIC_FIRST_FIT)
+        selected = choose_first_fit(state, task, &cost, &util);
+    else
+        selected = choose_worst_fit(state, task, &cost, &util);
 
+    if (selected < 0)
+    {
+        snprintf(assignment->reason, REJECTION_REASON_LENGTH,
+                 "No pasa admision en ningun nodo activo");
+        return 0;
+    }
+
+    NodePlan *node = &state->nodes[selected];
+    node->tasks[node->task_count] = *task;
+    node->costs[node->task_count] = cost;
+    node->task_count++;
+
+    assignment->accepted = 1;
+    assignment->node_id = node->info.id;
+    assignment->cost_ticks = cost;
+    assignment->utilization = util;
+    snprintf(assignment->reason, REJECTION_REASON_LENGTH, "Aceptada");
+
+    return 1;
+}
+
+int planner_load_initial_tasks(PlannerState *state,
+                               const Task tasks[],
+                               int task_count,
+                               TaskAssignment assignments[])
+{
+    if (state == NULL || tasks == NULL || assignments == NULL || task_count < 0)
+        return -1;
+
+    int accepted = 0;
     for (int i = 0; i < task_count; i++)
     {
-        assignments[i].task_id = tasks[i].id;
-        assignments[i].accepted = 0;
-        assignments[i].node_id = -1;
-        assignments[i].cost_ticks = -1;
-        assignments[i].utilization = 0.0;
-        snprintf(assignments[i].reason,
-                 REJECTION_REASON_LENGTH,
-                 "Aun no procesada");
+        int result = planner_add_task(state, &tasks[i], &assignments[i]);
+        if (result < 0)
+            return -1;
+        if (result == 1)
+            accepted++;
     }
+    return accepted;
+}
 
-    int accepted_count = 0;
+void planner_print_state(const PlannerState *state)
+{
+    if (state == NULL)
+        return;
 
-    for (int position = 0; position < task_count; position++)
+    printf("\n=== Estado actual del planificador ===\n");
+
+    for (int i = 0; i < state->node_count; i++)
     {
-        int task_index = order[position];
-        const Task *task = &tasks[task_index];
-        int selected_node = -1;
+        const NodePlan *node = &state->nodes[i];
+        printf("\nNodo %d | %s | %d UT/tick | U=%.4f\n",
+               node->info.id,
+               node->info.active ? "ACTIVO" : "INACTIVO",
+               node->info.speed_ut_per_tick,
+               planner_node_utilization(state, i));
 
-        if (config->heuristic == HEURISTIC_FIRST_FIT)
+        if (node->task_count == 0)
         {
-            selected_node = choose_first_fit(task,
-                                             nodes,
-                                             node_count,
-                                             loads,
-                                             config->algorithm);
-        }
-        else
-        {
-            selected_node = choose_worst_fit(task,
-                                             nodes,
-                                             node_count,
-                                             loads,
-                                             config->algorithm);
-        }
-
-        if (selected_node < 0)
-        {
-            snprintf(assignments[task_index].reason,
-                     REJECTION_REASON_LENGTH,
-                     "No pasa la prueba de admision en ningun nodo");
+            printf("  Sin tareas asignadas\n");
             continue;
         }
 
-        int cost = task_cost_ticks(task,
-                                   nodes[selected_node].speed_ut_per_tick);
-
-        add_to_node_load(&loads[selected_node], task, cost);
-
-        assignments[task_index].accepted = 1;
-        assignments[task_index].node_id = nodes[selected_node].id;
-        assignments[task_index].cost_ticks = cost;
-        assignments[task_index].utilization = task_utilization(task, cost);
-
-        snprintf(assignments[task_index].reason,
-                 REJECTION_REASON_LENGTH,
-                 "Aceptada");
-
-        accepted_count++;
-    }
-
-    return accepted_count;
-}
-
-void print_plan_summary(const Task tasks[],
-                        int task_count,
-                        const NodeInfo nodes[],
-                        int node_count,
-                        const TaskAssignment assignments[])
-{
-    printf("\n=== Resultado de planificacion ===\n");
-
-    for (int i = 0; i < task_count; i++)
-    {
-        if (assignments[i].accepted)
-        {
-            printf("Tarea %d -> Nodo %d | C=%d ticks | U=%.4f\n",
-                   tasks[i].id,
-                   assignments[i].node_id,
-                   assignments[i].cost_ticks,
-                   assignments[i].utilization);
-        }
-        else
-        {
-            printf("Tarea %d -> RECHAZADA | %s\n",
-                   tasks[i].id,
-                   assignments[i].reason);
-        }
-    }
-
-    printf("\n=== Nodos usados para la prueba ===\n");
-
-    for (int i = 0; i < node_count; i++)
-    {
-        printf("Nodo %d | velocidad = %d UT/tick\n",
-               nodes[i].id,
-               nodes[i].speed_ut_per_tick);
+        for (int j = 0; j < node->task_count; j++)
+            printf("  Tarea %d | C=%d | T=%d | U=%.4f\n",
+                   node->tasks[j].id,
+                   node->costs[j],
+                   node->tasks[j].period,
+                   task_utilization(&node->tasks[j], node->costs[j]));
     }
 }
