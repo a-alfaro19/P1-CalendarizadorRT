@@ -20,6 +20,8 @@ LIB_PROTOCOL  := $(LIB_DIR)/libprotocol.a
 HOST_SRC  := src/host/host.c
 HOST_BIN  := $(BIN_DIR)/host_app
 
+ALL_SRCS  := $(filter-out src/host/host.c, $(shell find src -name "*.c"))
+
 # Test files
 TEST_SRCS := $(wildcard $(TEST_DIR)/*_tests.c)
 TEST_BINS := $(patsubst $(TEST_DIR)/%.c,$(BUILD_DIR)/$(TEST_DIR)/%,$(TEST_SRCS))
@@ -45,10 +47,10 @@ $(HOST_BIN): $(HOST_SRC) $(LIB_PROTOCOL) $(HEADERS)
 host: $(HOST_BIN)
 
 # ---------- Tests Rules ----------
-$(BUILD_DIR)/$(TEST_DIR)/%: $(TEST_DIR)/%.c src/host/node_driver.c src/host/ring_buffer.c $(LIB_PROTOCOL) $(HEADERS)
+$(BUILD_DIR)/$(TEST_DIR)/%: $(TEST_DIR)/%.c $(ALL_SRCS) $(LIB_PROTOCOL) $(HEADERS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< src/host/node_driver.c src/host/ring_buffer.c -L$(LIB_DIR) -lprotocol -o $@
-
+	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< $(ALL_SRCS) -L$(LIB_DIR) -lprotocol -o $@
+	
 # Run every test and report a summary
 test-all: $(TEST_BINS)
 	@fail=0; \

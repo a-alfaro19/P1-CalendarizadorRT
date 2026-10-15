@@ -18,5 +18,6 @@
  * @param node_id Numeric identifier of the node.
  * @param tty_device Path to the serial device file.
  * @param tx_rb Pointer to the ring buffer used for outbound traffic to this node.
+ * @param shm_name Path or identifier string for the shared memory object.
  */
-void node_driver_run(int node_id, const char *tty_device, ring_buffer_t *tx_rb);
+void node_driver_run(int node_id, const char *tty_device, ring_buffer_t *tx_rb, const char *shm_name);

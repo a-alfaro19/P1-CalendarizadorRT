@@ -4,12 +4,35 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <signal.h>
+
 #include <protocol/protocol.h>
+#include "node_driver.h"
+
+typedef struct
+{
+    int node_id;
+    const char *tty_device;
+    ring_buffer_t *tx_rb;
+} node_driver_args_t;
+
+void run_node_driver_wrapper(void *arg)
+{
+    node_driver_args_t *args = (node_driver_args_t *)arg;
+    node_driver_run(args->node_id, args->tty_device, args->tx_rb);
+}
+
+typedef void (*thread_func_t)(void *arg);
 
 #define NUM_NODES 2
 
 // Children's PID
 pid_t node_pids[NUM_NODES];
+ring_buffer_t tx_ring_buffers[NUM_NODES];
+const char *tty_devices[NUM_NODES] = {
+    "/dev/pts/3", // O tu puerto serial real ej. "/dev/ttyUSB0"
+    "/dev/pts/4",
+    "/dev/pts/5",
+    "/dev/pts/6"};
 
 // Manejador de señales para apagado limpio (Ctrl+C)
 void handle_sigint(int sig)
@@ -30,21 +53,23 @@ void handle_sigint(int sig)
     exit(0);
 }
 
-// Función que ejecuta el proceso Controlador de Nodo
-void run_node_driver(int node_id)
+pid_t create_proccess(thread_func_t func, void *arg)
 {
-    // Aquí inicializarías la comunicación serial específica para el nodo (ej. /dev/ttyUSB0, /dev/ttyUSB1)
-    printf("[Driver Nodo %d] Inició proceso (PID: %d)\n", node_id, getpid());
+    pid_t pid = fork();
 
-    // Bucle principal del driver de nodo (recibir tramas, parsear, etc.)
-    while (1)
+    if (pid < 0)
     {
-        // Simulación de trabajo del driver
-        sleep(2);
-        printf("[Driver Nodo %d] Escuchando puerto serial...\n", node_id);
+        perror("[Error] Something went wrong creating process.");
+        handle_sigint(SIGTERM);
+    }
+    else if (pid == 0)
+    {
+        // --- CHILD PROCCESS ---
+        func(arg);
+        exit(EXIT_SUCCESS);
     }
 
-    exit(EXIT_SUCCESS);
+    return pid;
 }
 
 int main(void)
@@ -52,28 +77,22 @@ int main(void)
     // Registrar manejador para Ctrl+C
     signal(SIGINT, handle_sigint);
 
-    printf("[Host Principal] Iniciando Calendarizador en Tiempo Real (PID: %d)\n", getpid());
+    printf("[Host] (PID: %d)\n", getpid());
 
-    // Create proccess (Node controllers)
+    // Create Node Controller Proccess
     for (int i = 0; i < NUM_NODES; i++)
     {
-        pid_t pid = fork();
+        // 1. Initialize Ring Buffer
+        ring_buffer_init(&tx_ring_buffers[i]);
 
-        if (pid < 0)
-        {
-            perror("[Error] Something went wrong creating process.");
-            handle_sigint(SIGTERM);
-        }
-        else if (pid == 0)
-        {
-            // Proceso Hijo: Controlador de Nodo
-            run_node_driver(i + 1);
-        }
-        else
-        {
-            // Proceso Padre: Guarda el PID del hijo
-            node_pids[i] = pid;
-        }
+        // 2. Set driver args
+        node_driver_args_t node_driver_args = {
+            .node_id = i,
+            .tty_device = tty_devices[i],
+            .tx_rb = &tx_ring_buffers[i]};
+
+        // 3. Create process with driver & driver args
+        node_pids[i] = create_proccess(run_node_driver_wrapper, &node_driver_args);
     }
 
     // --- Lógica del Proceso Planificador (Host Padre) ---
