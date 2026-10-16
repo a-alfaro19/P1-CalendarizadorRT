@@ -8,7 +8,6 @@
 #define MAX_TASKS_PER_NODE 100
 #define REJECTION_REASON_LENGTH 128
 
-/* Informacion minima de cada nodo para planificar */
 typedef struct
 {
     int id;
@@ -16,7 +15,6 @@ typedef struct
     int active;
 } NodeInfo;
 
-/* Resultado de intentar asignar una tarea */
 typedef struct
 {
     int task_id;
@@ -27,7 +25,6 @@ typedef struct
     char reason[REJECTION_REASON_LENGTH];
 } TaskAssignment;
 
-/* Estado continuo del nodo */
 typedef struct
 {
     NodeInfo info;
@@ -36,7 +33,6 @@ typedef struct
     int task_count;
 } NodePlan;
 
-/* Estado completo del planificador del host */
 typedef struct
 {
     NodePlan nodes[MAX_NODES];
@@ -45,29 +41,38 @@ typedef struct
     AllocationHeuristic heuristic;
 } PlannerState;
 
-/* Inicializa el estado usando los resultados de calibracion */
 int planner_init(PlannerState *state,
                  const NodeInfo nodes[],
                  int node_count,
                  const Config *config);
 
-/* Agrega una tarea nueva sin borrar las asignaciones anteriores,permitiendo el modo manual */
 int planner_add_task(PlannerState *state,
                      const Task *task,
                      TaskAssignment *assignment);
 
-/* Carga el conjunto inicial de tareas sobre un estado vacio */
+/*
+ * Carga la planificacion inicial ordenando primero las tareas de mayor a menor
+ * utilizacion en el nodo activo mas rapido
+ */
 int planner_load_initial_tasks(PlannerState *state,
                                const Task tasks[],
                                int task_count,
                                TaskAssignment assignments[]);
 
-/* Busca una tarea por id. Retorna indice de nodo o -1. */
 int planner_find_task(const PlannerState *state, int task_id);
 
-/* Consulta la utilizacion actual de un nodo. */
 double planner_node_utilization(const PlannerState *state,
                                 int node_index);
+
+/*
+ * Se encarga de la caida de un nodo
+ * Solo reubica tareas periodicas, las esporadicas se rechazan
+ * Las tareas de los nodos sobrevivientes se mantienen
+ */
+int planner_handle_node_failure(PlannerState *state,
+                                int failed_node_id,
+                                TaskAssignment results[],
+                                int *result_count);
 
 void planner_print_state(const PlannerState *state);
 
