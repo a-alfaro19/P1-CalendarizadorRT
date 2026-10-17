@@ -13,4 +13,14 @@
  * indices de 16 bits de evq_t. */
 #define EVQ_CAPACIDAD 64u
 
+/* Duracion del tick hasta que el host manda la suya en 0x00, en ms. */
+#define TICK_MS_DEFECTO 10u
+
+/* Ventana de debounce del boton de la esporadica: tras una pulsacion
+ * aceptada, los flancos que llegan antes de este tiempo son rebotes. */
+#define DEBOUNCE_MS 50u
+
+/* Velocidad del puerto serial con el host (docs/PROTOCOL.md, 8N1). */
+#define SERIAL_BAUDIOS 115200u
+
 #endif
