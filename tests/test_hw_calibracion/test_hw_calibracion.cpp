@@ -1,6 +1,6 @@
 /*
  * Prueba en la placa: mide s_n con unidad_trabajo() real y lo reporta.
- * Se corre con la placa conectada:  pio test -e esp32   o   pio test -e pico
+ * Se corre con la placa conectada:  pio test -e esp8266   o   pio test -e pico
  */
 
 #include <Arduino.h>
@@ -22,8 +22,8 @@ static const uint16_t TICKS_MS[] = {1, 5, 10, 20, 50, 100};
  * (el Pico reinicia su USB al cargar el programa). */
 #define ESPERA_INICIAL_MS 2000u
 
-#if defined(ARDUINO_ARCH_ESP32)
-#define NOMBRE_PLACA "ESP32"
+#if defined(ARDUINO_ARCH_ESP8266)
+#define NOMBRE_PLACA "ESP8266"
 #elif defined(ARDUINO_ARCH_RP2040)
 #define NOMBRE_PLACA "RP2040 (Pico)"
 #else

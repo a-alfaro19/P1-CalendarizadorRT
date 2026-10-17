@@ -25,13 +25,16 @@ Requisitos: PlatformIO (la extensión de VS Code o `pio` en la terminal) y git.
 
 ```bash
 git clone --branch feature/calendarizador-nodo https://github.com/a-alfaro19/P1-CalendarizadorRT.git
-cd P1-CalendarizadorRT/node
+cd P1-CalendarizadorRT/src/node
 ```
+
+El proyecto de PlatformIO es `src/node/`. Si se abre en VS Code, abrir esa
+carpeta, no la raíz del repo.
 
 Conectar **una sola placa** y correr el comando que le corresponde:
 
 ```bash
-pio test -e esp32     # con el ESP32 conectado
+pio test -e esp8266   # con el ESP8266 (NodeMCU) conectado
 pio test -e pico      # con el Pico conectado
 ```
 
@@ -40,6 +43,8 @@ resultados. La primera vez descarga la plataforma y tarda unos minutos.
 
 ### Si se usa Linux
 
+- Si PlatformIO se instala por terminal y el instalador falla por falta de
+  `venv`, en Ubuntu/Debian se instala con `sudo apt install python3-venv`.
 - El usuario tiene que estar en el grupo `dialout`:
   `sudo usermod -aG dialout $USER`. Después hay que cerrar sesión y volver a
   entrar.
@@ -65,12 +70,12 @@ porque no lo encuentra. En ese caso:
 La salida trae líneas como estas (los números son de ejemplo):
 
 ```text
-placa: ESP32, CPU nominal: 240 MHz, margen: 80 %, ventana: 1000 ms
+placa: ESP8266, CPU nominal: 80 MHz, margen: 80 %, ventana: 1000 ms
 medicion 1: s_n = 1234 (tick 10 ms)
 ...
 dispersion: 0.41 % (min 1230, max 1235)
-RESULTADO ESP32 tick_ms=1 s_n=123
-RESULTADO ESP32 tick_ms=10 s_n=1234
+RESULTADO ESP8266 tick_ms=1 s_n=123
+RESULTADO ESP8266 tick_ms=10 s_n=1234
 ...
 4 Tests 0 Failures 0 Ignored
 ```
@@ -83,6 +88,7 @@ mandarla. Esos valores van en la documentación del proyecto.
 | Síntoma | Qué hacer |
 | :--- | :--- |
 | `la dispersion supera el 2 %` | Mandar la salida igual: es un dato útil. Repetir con la placa conectada directo a la computadora, sin hub USB. |
-| Carga bien pero no aparece ningún resultado | Correr `pio test -e pico --without-uploading` (o `-e esp32`) para solo leer la salida, o apretar el botón de reset de la placa. |
-| `Could not find a port` o se elige el puerto equivocado | Indicar el puerto: `pio test -e esp32 --upload-port /dev/ttyUSB0 --test-port /dev/ttyUSB0`. En el Pico suele ser `/dev/ttyACM0`; en Windows es `COMx`. |
+| Carga bien pero no aparece ningún resultado | Correr `pio test -e pico --without-uploading` (o `-e esp8266`) para solo leer la salida, o apretar el botón de reset de la placa. |
+| `Could not find a port` o se elige el puerto equivocado | Indicar el puerto: `pio test -e esp8266 --upload-port /dev/ttyUSB0 --test-port /dev/ttyUSB0`. En el Pico suele ser `/dev/ttyACM0`; en Windows es `COMx`. |
 | `Permission denied` en `/dev/tty...` (Linux) | Falta el grupo `dialout` o las reglas udev (ver arriba). |
+| El ESP8266 se conecta pero no aparece `/dev/ttyUSB0` (Ubuntu) | El servicio `brltty`, para lectores braille, toma los adaptadores USB-serial CH340/CP210x. Quitarlo con `sudo apt remove brltty` y reconectar la placa. Se confirma con `sudo dmesg \| tail`. |
