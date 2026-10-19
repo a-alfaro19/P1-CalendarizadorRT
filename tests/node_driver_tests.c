@@ -39,7 +39,7 @@ static void setup_test_shared_memory(void)
     shm_ptr->nodes[0].task_count = 1;
     shm_ptr->nodes[0].tasks[0] = (task_config_t){
         .task_id = 1,
-        .kind = 0, // TASK_PERIODIC
+        .kind = 0, // TASK_KIND_PERIODIC
         .cost_ticks = 2,
         .period = 20,
         .deadline = 20,

@@ -156,14 +156,14 @@ static void test_calib_resp_roundtrip(void)
 static void test_task_deploy_roundtrip(void)
 {
     uint8_t load[PROTOCOL_MAX_LOAD_SIZE];
-    msg_task_deploy_t message = {3, TASK_PERIODIC, 2, 20, 20}, recovered;
+    msg_task_deploy_t message = {3, TASK_KIND_PERIODIC, 2, 20, 20}, recovered;
     const uint8_t expected[] = {0x03, 0x00, 0x02, 0x00, 0x14, 0x00, 0x14, 0x00};
 
     int load_len = msg_task_deploy_pack(&message, load, sizeof load);
     assert(load_len == 8);
     assert(memcmp(load, expected, sizeof expected) == 0);
     assert(msg_task_deploy_unpack(load, (size_t)load_len, &recovered) == PROTOCOL_OK);
-    assert(recovered.task_id == 3 && recovered.kind == TASK_PERIODIC);
+    assert(recovered.task_id == 3 && recovered.kind == TASK_KIND_PERIODIC);
     assert(recovered.cost_ticks == 2 && recovered.period == 20 && recovered.deadline == 20);
 }
 
@@ -287,7 +287,7 @@ static void test_message_invalid_arguments(void)
 {
     uint8_t load[PROTOCOL_MAX_LOAD_SIZE] = {0};
     msg_calib_req_t calib_req = {.tick_ms = 10};
-    msg_task_deploy_t task_deploy = {3, TASK_PERIODIC, 2, 20, 20};
+    msg_task_deploy_t task_deploy = {3, TASK_KIND_PERIODIC, 2, 20, 20};
     msg_start_t start = {ALGORITHM_RMS, 10};
     msg_event_t event = {0};
     msg_ack_t ack = {0};
@@ -312,14 +312,14 @@ static void test_unpack_error_leaves_message_untouched(void)
 {
     uint8_t load[PROTOCOL_MAX_LOAD_SIZE] = {0};
     msg_event_t event = {123, EVENT_RELEASE, 4, 9};
-    msg_task_deploy_t task_deploy = {1, TASK_SPORADIC, 2, 3, 4};
+    msg_task_deploy_t task_deploy = {1, TASK_KIND_SPORADIC, 2, 3, 4};
 
     assert(msg_event_unpack(load, 3, &event) == PROTOCOL_ERR_LEN);
     assert(event.tick == 123 && event.event_type == EVENT_RELEASE);
     assert(event.task_id == 4 && event.aux == 9);
 
     assert(msg_task_deploy_unpack(load, 1, &task_deploy) == PROTOCOL_ERR_LEN);
-    assert(task_deploy.task_id == 1 && task_deploy.kind == TASK_SPORADIC);
+    assert(task_deploy.task_id == 1 && task_deploy.kind == TASK_KIND_SPORADIC);
     assert(task_deploy.cost_ticks == 2 && task_deploy.period == 3 && task_deploy.deadline == 4);
 }
 

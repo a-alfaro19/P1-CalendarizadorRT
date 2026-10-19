@@ -5,15 +5,22 @@
 #include <assert.h>
 
 /*
- * Test harness macro:
- * Prints the test name with fixed padding, flushes stdout, executes the test function,
- * and prints "OK" if all assertions pass. A failed assert() aborts automatically.
+ * Desktop runs use assert() and print each test result. On Arduino, delegate
+ * test execution to Unity so PlatformIO can report hardware test results.
  */
-#define RUN_TEST(test)            \
-    do                            \
-    {                             \
-        printf("  %-52s", #test); \
-        fflush(stdout);           \
-        test();                   \
-        puts("OK");               \
+#ifdef ARDUINO
+#define TEST_HARNESS_RUN_TEST(test) RUN_TEST(test)
+#else
+#define TEST_HARNESS_RUN_TEST(test) \
+    do                              \
+    {                               \
+        printf("  %-52s", #test);   \
+        fflush(stdout);             \
+        test();                     \
+        puts("OK");                 \
     } while (0)
+
+#ifndef RUN_TEST
+#define RUN_TEST(test) TEST_HARNESS_RUN_TEST(test)
+#endif
+#endif

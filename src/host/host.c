@@ -2,25 +2,32 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <signal.h>
 
 #include <protocol/protocol.h>
-#include "node_driver.h"
+#include <host/scheduler/scheduler.h>
+#include <host/node_driver.h>
+#include <host/shared_memory.h>
+
+#define SHM_NAME "/shm_system_config"
 
 typedef struct
 {
     int node_id;
     const char *tty_device;
     ring_buffer_t *tx_rb;
+    const char *shm_name;
 } node_driver_args_t;
 
 void run_node_driver_wrapper(void *arg)
 {
     node_driver_args_t *args = (node_driver_args_t *)arg;
-    node_driver_run(args->node_id, args->tty_device, args->tx_rb);
+    node_driver_run(args->node_id, args->tty_device, args->tx_rb, args->shm_name);
 }
-
 typedef void (*thread_func_t)(void *arg);
 
 #define NUM_NODES 2
@@ -72,8 +79,120 @@ pid_t create_proccess(thread_func_t func, void *arg)
     return pid;
 }
 
-int main(void)
+static void print_assignment(const TaskAssignment *assignment)
 {
+    if (assignment->accepted)
+    {
+        printf("Tarea %d aceptada -> Nodo %d | C=%d | U=%.4f | %s\n",
+               assignment->task_id,
+               assignment->node_id,
+               assignment->cost_ticks,
+               assignment->utilization,
+               assignment->reason);
+    }
+    else
+    {
+        printf("Tarea %d rechazada -> %s\n",
+               assignment->task_id,
+               assignment->reason);
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    /*
+     * Uso esperado:
+     *   ./bin/host_app config/config.txt 20 12
+     *   ./bin/host_app config/config.txt 20 12 --fail 1
+     */
+    if (argc != 4 && argc != 6)
+    {
+        fprintf(stderr,
+                "Uso: %s <config> <vel_nodo1> <vel_nodo2> [--fail nodo]\n",
+                argv[0]);
+        return 1;
+    }
+
+    // 1. Cargar configuración y planificador
+    Config config;
+    if (load_config(argv[1], &config) != 0)
+        return 1;
+
+    int node1_speed = atoi(argv[2]);
+    int node2_speed = atoi(argv[3]);
+
+    if (node1_speed <= 0 || node2_speed <= 0)
+    {
+        fprintf(stderr, "Las velocidades deben ser mayores que 0\n");
+        return 1;
+    }
+
+    NodeInfo nodes[2] = {
+        {1, node1_speed, 1},
+        {2, node2_speed, 1}};
+
+    PlannerState planner;
+    if (planner_init(&planner, nodes, 2, &config) != 0)
+    {
+        fprintf(stderr, "No se pudo inicializar el planificador\n");
+        return 1;
+    }
+
+    Task tasks[MAX_TASKS];
+    int task_count = load_tasks(config.task_file, tasks, MAX_TASKS);
+    if (task_count < 0)
+        return 1;
+
+    TaskAssignment assignments[MAX_TASKS];
+    int accepted = planner_load_initial_tasks(&planner, tasks, task_count, assignments);
+    if (accepted < 0)
+        return 1;
+
+    printf("=== Planificación inicial cargada ===\n");
+    for (int i = 0; i < task_count; i++)
+        print_assignment(&assignments[i]);
+    printf("Aceptadas inicialmente: %d de %d\n\n", accepted, task_count);
+
+    // --- CONFIGURACIÓN DE MEMORIA COMPARTIDA ---
+    // 1. Limpiar por si quedó un segmento abierto anterior
+    shm_unlink(SHM_NAME);
+
+    // 2. Crear el objeto de memoria compartida
+    int shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+    if (shm_fd < 0)
+    {
+        perror("[Error Host] No se pudo crear la memoria compartida");
+        return 1;
+    }
+
+    // 3. Ajustar el tamaño al de nuestra estructura global del sistema
+    if (ftruncate(shm_fd, sizeof(shared_system_config_t)) < 0)
+    {
+        perror("[Error Host] Error al redimensionar la memoria compartida");
+        close(shm_fd);
+        return 1;
+    }
+
+    // 4. Mapear en el espacio de direcciones del proceso padre
+    void *shm_base = mmap(NULL, sizeof(shared_system_config_t), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+    close(shm_fd); // El descriptor ya no es necesario una vez mapeado
+
+    if (shm_base == MAP_FAILED)
+    {
+        perror("[Error Host] Falló el mapeo de memoria compartida");
+        return 1;
+    }
+
+    // 5. Poblar la memoria compartida con la configuración y tareas del planificador
+    shared_system_config_t *sys_config = (shared_system_config_t *)shm_base;
+    // (Aquí copias la información de tus nodos y tareas estructuradas desde tu objeto 'planner' hacia sys_config->nodes)
+    // Ejemplo básico para estructurar los nodos:
+    for (int i = 0; i < NUM_NODES; i++)
+    {
+        sys_config->nodes[i].node_id = i;
+        // Asignas el conteo y copias las tareas correspondientes a cada nodo según el planificador...
+    }
+
     // Registrar manejador para Ctrl+C
     signal(SIGINT, handle_sigint);
 

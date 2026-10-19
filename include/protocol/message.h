@@ -42,8 +42,8 @@ typedef enum
 /** Task kind (msg_task_deploy_t.kind). */
 enum
 {
-    TASK_PERIODIC = 0, /**< Periodic task execution. */
-    TASK_SPORADIC = 1  /**< Sporadic task execution. */
+    TASK_KIND_PERIODIC = 0, /**< Periodic task execution. */
+    TASK_KIND_SPORADIC = 1  /**< Sporadic task execution. */
 };
 
 /** Scheduling algorithm (msg_start_t.algorithm). */

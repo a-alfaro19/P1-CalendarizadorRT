@@ -14,7 +14,7 @@
 typedef struct
 {
     uint8_t task_id;
-    uint8_t kind; // TASK_PERIODIC / TASK_SPORADIC
+    uint8_t kind; // TASK_PERIODIC / TASK_KIND_SPORADIC
     uint16_t cost_ticks;
     uint16_t period;
     uint16_t deadline;

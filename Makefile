@@ -9,59 +9,100 @@ TEST_DIR  := tests
 
 HEADERS   := $(shell find include -name "*.h")
 
-# Protocol source and object files
+# ---------- Static libs ----------
+LIB_PROTOCOL  := $(LIB_DIR)/libprotocol.a
+LIB_SCHEDULER := $(LIB_DIR)/libscheduler.a
+LIB_HOST_COMM := $(LIB_DIR)/libhost_comm.a
+
+# Protocol objects
 PROTOCOL_SRCS := $(shell find src/protocol -name "*.c")
 PROTOCOL_OBJS := $(patsubst src/protocol/%.c,$(BUILD_DIR)/obj/protocol/%.o,$(PROTOCOL_SRCS))
 
-# Protocol static lib
-LIB_PROTOCOL  := $(LIB_DIR)/libprotocol.a
+# Scheduler objects
+SCHEDULER_SRCS := $(shell find src/host/scheduler -name "*.c")
+SCHEDULER_OBJS := $(patsubst src/host/scheduler/%.c,$(BUILD_DIR)/obj/host/scheduler/%.o,$(SCHEDULER_SRCS))
 
-# Host source files
+# Host Commons objects
+HOST_COMM_SRCS := src/host/ring_buffer.c src/host/shared_memory.c src/host/node_driver.c
+HOST_COMM_OBJS := $(patsubst src/host/%.c,$(BUILD_DIR)/obj/host/comm/%.o,$(HOST_COMM_SRCS))
+
+# Host binary
 HOST_SRC  := src/host/host.c
 HOST_BIN  := $(BIN_DIR)/host_app
-
-ALL_SRCS  := $(filter-out src/host/host.c, $(shell find src -name "*.c"))
 
 # Test files
 TEST_SRCS := $(wildcard $(TEST_DIR)/*_tests.c)
 TEST_BINS := $(patsubst $(TEST_DIR)/%.c,$(BUILD_DIR)/$(TEST_DIR)/%,$(TEST_SRCS))
+NODE_SCHEDULER_SRCS := src/node/scheduler/calendarizador.c src/node/scheduler/evq.c
+NODE_SCHEDULER_HEADERS := include/node/scheduler/calendarizador.h include/node/scheduler/evq.h include/node/scheduler/sched_config.h
 
-.DEFAULT_GOAL := test-all
-.PHONY: test-all host clean
+.DEFAULT_GOAL := all
+.PHONY: all host test-all clean
 
-# ---------- Protocol Lib Generation Rules ----------
+all: host
+
+# ---------- Static Libs Rules ----------
+
 $(LIB_PROTOCOL): $(PROTOCOL_OBJS)
 	@mkdir -p $(dir $@)
 	ar rcs $@ $^
 
-# Regla para compilar los objetos del protocolo
+$(LIB_SCHEDULER): $(SCHEDULER_OBJS)
+	@mkdir -p $(dir $@)
+	ar rcs $@ $^
+
+$(LIB_HOST_COMM): $(HOST_COMM_OBJS)
+	@mkdir -p $(dir $@)
+	ar rcs $@ $^
+
+# ---------- Objects Compilation Rules ----------
+
 $(BUILD_DIR)/obj/protocol/%.o: src/protocol/%.c $(HEADERS)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# ---------- Host Rules ----------
-$(HOST_BIN): $(HOST_SRC) $(LIB_PROTOCOL) $(HEADERS)
+$(BUILD_DIR)/obj/host/scheduler/%.o: src/host/scheduler/%.c $(HEADERS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lprotocol -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
-host: $(HOST_BIN)
+$(BUILD_DIR)/obj/host/comm/%.o: src/host/%.c $(HEADERS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# ---------- Host Rules ----------
+
+host: $(LIB_PROTOCOL) $(LIB_HOST_COMM) $(LIB_SCHEDULER) $(HOST_BIN)
+
+$(HOST_BIN): $(HOST_SRC) $(LIB_PROTOCOL) $(LIB_HOST_COMM) $(LIB_SCHEDULER)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lhost_comm -lscheduler -lprotocol -lm -o $@
 
 # ---------- Tests Rules ----------
-$(BUILD_DIR)/$(TEST_DIR)/%: $(TEST_DIR)/%.c $(ALL_SRCS) $(LIB_PROTOCOL) $(HEADERS)
+
+# Node scheduler tests
+$(BUILD_DIR)/$(TEST_DIR)/node_scheduler_tests: $(TEST_DIR)/node_scheduler_tests.c $(NODE_SCHEDULER_SRCS) $(NODE_SCHEDULER_HEADERS) $(TEST_DIR)/test_harness.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< $(ALL_SRCS) -L$(LIB_DIR) -lprotocol -o $@
+	$(CC) $(CFLAGS) $(SANFLAGS) -Iinclude/node/scheduler -Itests $< $(NODE_SCHEDULER_SRCS) -o $@
+
+# Generic compilation for any test
+$(BUILD_DIR)/$(TEST_DIR)/%: $(TEST_DIR)/%.c $(LIB_PROTOCOL) $(LIB_HOST_COMM) $(LIB_SCHEDULER) $(HEADERS)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< -L$(LIB_DIR) -lhost_comm -lscheduler -lprotocol -lm -o $@
 	
-# Run every test and report a summary
+$(BUILD_DIR)/$(TEST_DIR)/%/:
+	@mkdir -p $@
+
+# Run all tests
 test-all: $(TEST_BINS)
 	@fail=0; \
 	for t in $(TEST_BINS); do \
-		echo "==> $$t"; \
+		echo "==> Ejecutando $$t"; \
 		./$$t || fail=1; \
 	done; \
-	if [ $$fail -eq 0 ]; then echo "ALL TEST PROGRAMS PASSED"; \
-	else echo "SOME TEST PROGRAMS FAILED"; exit 1; fi
+	if [ $$fail -eq 0 ]; then echo "TODOS LOS TESTS PASARON EXITOSAMENTE"; \
+	else echo "ALGUNOS TESTS FALLARON"; exit 1; fi
 
-# Run a single test program: make test-protocol  (runs tests/protocol_tests.c)
+# Run a single test: make test-protocol
 test-%: $(BUILD_DIR)/$(TEST_DIR)/%_tests
 	./$<
 
