@@ -17,6 +17,13 @@
 
 #define TEST_SHM_NAME "/test_node_driver_shm"
 
+static shared_memory_t test_shared_memory;
+static const node_driver_config_t test_driver_config = {
+    .tick_ms = 10,
+    .algorithm = ALGORITHM_EDF,
+    .report_period = 10,
+};
+
 /* ===========================================================================
  * Helper to initialize a test shared memory segment with sample tasks
  * ========================================================================= */
@@ -25,28 +32,19 @@ static void setup_test_shared_memory(void)
     // Remove if it already exists from previous runs
     shm_unlink(TEST_SHM_NAME);
 
-    int shm_fd = shm_open(TEST_SHM_NAME, O_CREAT | O_RDWR, 0666);
-    assert(shm_fd >= 0);
+    assert(shared_memory_create(&test_shared_memory, TEST_SHM_NAME) == 0);
 
-    assert(ftruncate(shm_fd, sizeof(shared_system_config_t)) == 0);
-
-    shared_system_config_t *shm_ptr = mmap(NULL, sizeof(shared_system_config_t), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    assert(shm_ptr != MAP_FAILED);
-
-    // Initialize with a test task for node 0
-    memset(shm_ptr, 0, sizeof(shared_system_config_t));
-    shm_ptr->nodes[0].node_id = 0;
-    shm_ptr->nodes[0].task_count = 1;
-    shm_ptr->nodes[0].tasks[0] = (task_config_t){
+    shared_system_config_t config = {0};
+    config.nodes[0].node_id = 0;
+    config.nodes[0].task_count = 1;
+    config.nodes[0].tasks[0] = (task_config_t){
         .task_id = 1,
         .kind = 0, // TASK_KIND_PERIODIC
         .cost_ticks = 2,
         .period = 20,
         .deadline = 20,
         .assigned = false};
-
-    munmap(shm_ptr, sizeof(shared_system_config_t));
-    close(shm_fd);
+    assert(shared_memory_write_config(&test_shared_memory, &config) == 0);
 }
 
 /* ===========================================================================
@@ -97,7 +95,7 @@ static void test_node_driver_tx(void)
     {
         // --- CHILD PROCESS (runs driver) ---
         close(master_fd);
-        node_driver_run(0, slave_name, &tx_rb, TEST_SHM_NAME);
+        node_driver_run(0, slave_name, &tx_rb, TEST_SHM_NAME, &test_driver_config);
         exit(EXIT_SUCCESS);
     }
     else
@@ -123,7 +121,7 @@ static void test_node_driver_tx(void)
         kill(pid, SIGTERM);
         waitpid(pid, NULL, 0);
         close(master_fd);
-        shm_unlink(TEST_SHM_NAME);
+        assert(shared_memory_destroy(&test_shared_memory) == 0);
     }
 }
 
@@ -171,7 +169,7 @@ void test_node_driver_rx(void)
     {
         // --- CHILD PROCESS (runs driver) ---
         close(master_fd);
-        node_driver_run(0, slave_name, &tx_rb, TEST_SHM_NAME);
+        node_driver_run(0, slave_name, &tx_rb, TEST_SHM_NAME, &test_driver_config);
         exit(EXIT_SUCCESS);
     }
     else
@@ -191,7 +189,7 @@ void test_node_driver_rx(void)
         kill(pid, SIGTERM);
         waitpid(pid, NULL, 0);
         close(master_fd);
-        shm_unlink(TEST_SHM_NAME);
+        assert(shared_memory_destroy(&test_shared_memory) == 0);
     }
 }
 
@@ -224,7 +222,7 @@ static void test_node_driver_corrupted_frame(void)
     if (pid == 0)
     {
         close(master_fd);
-        node_driver_run(0, slave_name, &tx_rb, TEST_SHM_NAME);
+        node_driver_run(0, slave_name, &tx_rb, TEST_SHM_NAME, &test_driver_config);
         exit(EXIT_SUCCESS);
     }
     else
@@ -244,7 +242,7 @@ static void test_node_driver_corrupted_frame(void)
         kill(pid, SIGTERM);
         waitpid(pid, NULL, 0);
         close(master_fd);
-        shm_unlink(TEST_SHM_NAME);
+        assert(shared_memory_destroy(&test_shared_memory) == 0);
     }
 }
 
@@ -276,7 +274,7 @@ static void test_node_driver_unexpected_message(void)
     if (pid == 0)
     {
         close(master_fd);
-        node_driver_run(0, slave_name, &tx_rb, TEST_SHM_NAME);
+        node_driver_run(0, slave_name, &tx_rb, TEST_SHM_NAME, &test_driver_config);
         exit(EXIT_SUCCESS);
     }
     else
@@ -295,7 +293,7 @@ static void test_node_driver_unexpected_message(void)
         kill(pid, SIGTERM);
         waitpid(pid, NULL, 0);
         close(master_fd);
-        shm_unlink(TEST_SHM_NAME);
+        assert(shared_memory_destroy(&test_shared_memory) == 0);
     }
 }
 

@@ -1,19 +1,23 @@
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#include <string.h>
 #include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/wait.h>
-#include <signal.h>
+#include <unistd.h>
 
-#include <protocol/protocol.h>
-#include <host/scheduler/scheduler.h>
 #include <host/node_driver.h>
+#include <host/process_manager.h>
+#include <host/ring_buffer.h>
+#include <host/scheduler/scheduler.h>
 #include <host/shared_memory.h>
 
 #define SHM_NAME "/shm_system_config"
+#define HOST_NODE_COUNT 2
+#define SCHEDULER_REPORT_INTERVAL_SECONDS 5
 
 typedef struct
 {
@@ -21,62 +25,31 @@ typedef struct
     const char *tty_device;
     ring_buffer_t *tx_rb;
     const char *shm_name;
+    node_driver_config_t driver_config;
 } node_driver_args_t;
 
-void run_node_driver_wrapper(void *arg)
+typedef struct
 {
-    node_driver_args_t *args = (node_driver_args_t *)arg;
-    node_driver_run(args->node_id, args->tty_device, args->tx_rb, args->shm_name);
-}
-typedef void (*thread_func_t)(void *arg);
+    const PlannerState *planner;
+    shared_memory_t *shared_memory;
+} scheduler_process_args_t;
 
-#define NUM_NODES 2
+static process_manager_t process_manager;
 
-// Children's PID
-pid_t node_pids[NUM_NODES];
-ring_buffer_t tx_ring_buffers[NUM_NODES];
-const char *tty_devices[NUM_NODES] = {
-    "/dev/pts/3", // O tu puerto serial real ej. "/dev/ttyUSB0"
-    "/dev/pts/4",
-    "/dev/pts/5",
-    "/dev/pts/6"};
-
-// Manejador de señales para apagado limpio (Ctrl+C)
-void handle_sigint(int sig)
+static int parse_node_speed(const char *text, int *speed)
 {
-    (void)sig;
-    printf("\n[Host] Señal de interrupción recibida. Terminando controladores de nodo...\n");
-    for (int i = 0; i < NUM_NODES; i++)
-    {
-        if (node_pids[i] > 0)
-        {
-            kill(node_pids[i], SIGTERM);
-        }
-    }
-    // Esperar a que todos los hijos mueran
-    while (wait(NULL) > 0)
-        ;
-    printf("[Host] Apagado completo.\n");
-    exit(0);
-}
+    char *end = NULL;
+    errno = 0;
+    long value = strtol(text, &end, 10);
 
-pid_t create_proccess(thread_func_t func, void *arg)
-{
-    pid_t pid = fork();
-
-    if (pid < 0)
+    if (errno != 0 || end == text || *end != '\0' || value <= 0 || value > INT_MAX)
     {
-        perror("[Error] Something went wrong creating process.");
-        handle_sigint(SIGTERM);
-    }
-    else if (pid == 0)
-    {
-        // --- CHILD PROCCESS ---
-        func(arg);
-        exit(EXIT_SUCCESS);
+        fprintf(stderr, "[Host] Velocidad de nodo inválida: %s\n", text);
+        return -1;
     }
 
-    return pid;
+    *speed = (int)value;
+    return 0;
 }
 
 static void print_assignment(const TaskAssignment *assignment)
@@ -98,131 +71,342 @@ static void print_assignment(const TaskAssignment *assignment)
     }
 }
 
-int main(int argc, char *argv[])
+static int initialize_planner(int argc,
+                              char *argv[],
+                              Config *config,
+                              PlannerState *planner,
+                              TaskAssignment assignments[],
+                              int *task_count)
 {
-    /*
-     * Uso esperado:
-     *   ./bin/host_app config/config.txt 20 12
-     *   ./bin/host_app config/config.txt 20 12 --fail 1
-     */
     if (argc != 4 && argc != 6)
     {
         fprintf(stderr,
                 "Uso: %s <config> <vel_nodo1> <vel_nodo2> [--fail nodo]\n",
                 argv[0]);
-        return 1;
+        return -1;
     }
 
-    // 1. Cargar configuración y planificador
-    Config config;
-    if (load_config(argv[1], &config) != 0)
-        return 1;
-
-    int node1_speed = atoi(argv[2]);
-    int node2_speed = atoi(argv[3]);
-
-    if (node1_speed <= 0 || node2_speed <= 0)
+    if (argc == 6 && strcmp(argv[4], "--fail") != 0)
     {
-        fprintf(stderr, "Las velocidades deben ser mayores que 0\n");
-        return 1;
+        fprintf(stderr, "[Host] Opción inválida: %s\n", argv[4]);
+        return -1;
     }
 
-    NodeInfo nodes[2] = {
-        {1, node1_speed, 1},
-        {2, node2_speed, 1}};
+    if (load_config(argv[1], config) != 0)
+        return -1;
 
-    PlannerState planner;
-    if (planner_init(&planner, nodes, 2, &config) != 0)
+    int node_speeds[HOST_NODE_COUNT];
+    if (parse_node_speed(argv[2], &node_speeds[0]) != 0 ||
+        parse_node_speed(argv[3], &node_speeds[1]) != 0)
+        return -1;
+
+    NodeInfo nodes[HOST_NODE_COUNT] = {
+        {1, node_speeds[0], 1},
+        {2, node_speeds[1], 1}};
+
+    if (planner_init(planner, nodes, HOST_NODE_COUNT, config) != 0)
     {
-        fprintf(stderr, "No se pudo inicializar el planificador\n");
-        return 1;
+        fprintf(stderr, "[Host] No se pudo inicializar el planificador\n");
+        return -1;
     }
 
     Task tasks[MAX_TASKS];
-    int task_count = load_tasks(config.task_file, tasks, MAX_TASKS);
-    if (task_count < 0)
-        return 1;
+    *task_count = load_tasks(config->task_file, tasks, MAX_TASKS);
+    if (*task_count < 0)
+        return -1;
 
-    TaskAssignment assignments[MAX_TASKS];
-    int accepted = planner_load_initial_tasks(&planner, tasks, task_count, assignments);
+    int accepted = planner_load_initial_tasks(planner,
+                                              tasks,
+                                              *task_count,
+                                              assignments);
     if (accepted < 0)
-        return 1;
+    {
+        fprintf(stderr, "[Host] No se pudieron planificar las tareas iniciales\n");
+        return -1;
+    }
 
     printf("=== Planificación inicial cargada ===\n");
-    for (int i = 0; i < task_count; i++)
+    for (int i = 0; i < *task_count; i++)
         print_assignment(&assignments[i]);
-    printf("Aceptadas inicialmente: %d de %d\n\n", accepted, task_count);
+    printf("Aceptadas inicialmente: %d de %d\n\n", accepted, *task_count);
 
-    // --- CONFIGURACIÓN DE MEMORIA COMPARTIDA ---
-    // 1. Limpiar por si quedó un segmento abierto anterior
-    shm_unlink(SHM_NAME);
+    return 0;
+}
 
-    // 2. Crear el objeto de memoria compartida
-    int shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
-    if (shm_fd < 0)
+static int copy_planner_to_shared_memory(const PlannerState *planner,
+                                         shared_system_config_t *config)
+{
+    const int shared_task_capacity =
+        (int)(sizeof config->nodes[0].tasks / sizeof config->nodes[0].tasks[0]);
+    if (planner->node_count < 0 || planner->node_count > SHARED_NUM_NODES)
     {
-        perror("[Error Host] No se pudo crear la memoria compartida");
-        return 1;
+        fprintf(stderr, "[Host] Cantidad de nodos fuera de capacidad de memoria compartida\n");
+        return -1;
     }
 
-    // 3. Ajustar el tamaño al de nuestra estructura global del sistema
-    if (ftruncate(shm_fd, sizeof(shared_system_config_t)) < 0)
+    for (int i = 0; i < SHARED_NUM_NODES; i++)
     {
-        perror("[Error Host] Error al redimensionar la memoria compartida");
-        close(shm_fd);
-        return 1;
+        config->nodes[i].node_id = -1;
+        config->nodes[i].task_count = 0;
     }
 
-    // 4. Mapear en el espacio de direcciones del proceso padre
-    void *shm_base = mmap(NULL, sizeof(shared_system_config_t), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    close(shm_fd); // El descriptor ya no es necesario una vez mapeado
-
-    if (shm_base == MAP_FAILED)
+    for (int node_index = 0; node_index < planner->node_count; node_index++)
     {
-        perror("[Error Host] Falló el mapeo de memoria compartida");
-        return 1;
-    }
+        const NodePlan *plan = &planner->nodes[node_index];
+        if (plan->task_count < 0 || plan->task_count > shared_task_capacity)
+        {
+            fprintf(stderr,
+                    "[Host] Nodo %d tiene %d tareas, pero la memoria compartida permite %d\n",
+                    plan->info.id,
+                    plan->task_count,
+                    shared_task_capacity);
+            return -1;
+        }
 
-    // 5. Poblar la memoria compartida con la configuración y tareas del planificador
-    shared_system_config_t *sys_config = (shared_system_config_t *)shm_base;
-    // (Aquí copias la información de tus nodos y tareas estructuradas desde tu objeto 'planner' hacia sys_config->nodes)
-    // Ejemplo básico para estructurar los nodos:
-    for (int i = 0; i < NUM_NODES; i++)
-    {
-        sys_config->nodes[i].node_id = i;
-        // Asignas el conteo y copias las tareas correspondientes a cada nodo según el planificador...
-    }
+        node_task_list_t *node_list = &config->nodes[node_index];
+        node_list->node_id = plan->info.id;
+        node_list->task_count = plan->task_count;
 
-    // Registrar manejador para Ctrl+C
-    signal(SIGINT, handle_sigint);
+        for (int task_index = 0; task_index < plan->task_count; task_index++)
+        {
+            const Task *task = &plan->tasks[task_index];
+            const int cost_ticks = plan->costs[task_index];
 
-    printf("[Host] (PID: %d)\n", getpid());
+            if (task->id < 0 || task->id >= UINT8_MAX ||
+                cost_ticks < 0 || cost_ticks > UINT16_MAX ||
+                task->period <= 0 || task->period > UINT16_MAX ||
+                task->deadline <= 0 || task->deadline > UINT16_MAX)
+            {
+                fprintf(stderr,
+                        "[Host] Parámetros fuera de rango para la tarea %d del nodo %d\n",
+                        task->id,
+                        plan->info.id);
+                return -1;
+            }
 
-    // Create Node Controller Proccess
-    for (int i = 0; i < NUM_NODES; i++)
-    {
-        // 1. Initialize Ring Buffer
-        ring_buffer_init(&tx_ring_buffers[i]);
-
-        // 2. Set driver args
-        node_driver_args_t node_driver_args = {
-            .node_id = i,
-            .tty_device = tty_devices[i],
-            .tx_rb = &tx_ring_buffers[i]};
-
-        // 3. Create process with driver & driver args
-        node_pids[i] = create_proccess(run_node_driver_wrapper, &node_driver_args);
-    }
-
-    // --- Lógica del Proceso Planificador (Host Padre) ---
-    printf("[Planificador] Todos los drivers de nodo han sido desplegados. Ejecutando lógica de planificación...\n");
-
-    while (1)
-    {
-        // El planificador gestionará aquí las tareas, tiempos y sincronización por memoria compartida
-        sleep(5);
-        printf("[Planificador] Ciclo de planificación activo...\n");
+            task_config_t *shared_task = &node_list->tasks[task_index];
+            shared_task->task_id = (uint8_t)task->id;
+            shared_task->kind = (uint8_t)task->type;
+            shared_task->cost_ticks = (uint16_t)cost_ticks;
+            shared_task->period = (uint16_t)task->period;
+            shared_task->deadline = (uint16_t)task->deadline;
+            shared_task->assigned = false;
+        }
     }
 
     return 0;
+}
+
+static int create_shared_state(const PlannerState *planner,
+                               shared_memory_t *shared_memory)
+{
+    if (shared_memory_create(shared_memory, SHM_NAME) != 0)
+    {
+        perror("[Host] No se pudo crear memoria compartida");
+        return -1;
+    }
+
+    shared_system_config_t config = {0};
+    if (copy_planner_to_shared_memory(planner, &config) != 0)
+    {
+        shared_memory_destroy(shared_memory);
+        return -1;
+    }
+    if (shared_memory_write_config(shared_memory, &config) != 0)
+    {
+        perror("[Host] No se pudo inicializar la configuración compartida");
+        shared_memory_destroy(shared_memory);
+        return -1;
+    }
+
+    return 0;
+}
+
+static void scheduler_process(void *arg)
+{
+    scheduler_process_args_t *args = arg;
+
+    printf("[Scheduler] Planificador iniciado (PID: %ld)\n", (long)getpid());
+    planner_print_state(args->planner);
+
+    while (!process_manager_shutdown_requested(&process_manager))
+    {
+        sleep(SCHEDULER_REPORT_INTERVAL_SECONDS);
+        if (process_manager_shutdown_requested(&process_manager))
+            break;
+        printf("[Scheduler] Proceso activo; esperando lógica de planificación dinámica.\n");
+    }
+}
+
+static void node_driver_process(void *arg)
+{
+    node_driver_args_t *args = arg;
+    printf("[Host] Iniciando driver del nodo %d en %s (PID: %ld)\n",
+           args->node_id,
+           args->tty_device,
+           (long)getpid());
+    node_driver_run(args->node_id,
+                    args->tty_device,
+                    args->tx_rb,
+                    args->shm_name,
+                    &args->driver_config);
+}
+
+// Temp (Dummy)
+static void report_process(void *arg)
+{
+    shared_memory_t *shared_memory = arg;
+    printf("[Report] Proceso de reporte iniciado (PID: %ld); reporte detallado pendiente.\n",
+           (long)getpid());
+
+    while (!process_manager_shutdown_requested(&process_manager))
+    {
+        sleep(SCHEDULER_REPORT_INTERVAL_SECONDS);
+        if (process_manager_shutdown_requested(&process_manager))
+            break;
+
+        for (int node_id = 1; node_id <= HOST_NODE_COUNT; node_id++)
+        {
+            shared_node_status_t status;
+            if (shared_memory_read_node_status(shared_memory, node_id, &status) != 0)
+            {
+                perror("[Report] No se pudo leer el estado del nodo");
+                _exit(EXIT_FAILURE);
+            }
+
+            printf("[Report] Nodo %d: %s, tick=%u, tramas inválidas=%u, "
+                   "reportes perdidos=%u, "
+                   "tareas completadas=%llu, plazos perdidos=%llu, "
+                   "disparos esporádicos ignorados=%llu.\n",
+                   node_id,
+                   status.active ? "activo" : "inactivo",
+                   status.last_tick,
+                   status.bad_frames,
+                   status.missed_reports,
+                   (unsigned long long)status.completed_tasks,
+                   (unsigned long long)status.missed_deadlines,
+                   (unsigned long long)status.ignored_sporadic_triggers);
+            if (status.has_last_event)
+            {
+                printf("[Report] Nodo %d último evento: tipo=%u, tarea=%u, tick=%u, aux=%u.\n",
+                       node_id,
+                       status.last_event.event_type,
+                       status.last_event.task_id,
+                       status.last_event.tick,
+                       status.last_event.aux);
+            }
+        }
+    }
+}
+
+static int launch_processes(const Config *config,
+                            const PlannerState *planner,
+                            shared_memory_t *shared_memory)
+{
+    if (config->tick_ms > UINT16_MAX ||
+        config->tick_report_period > UINT16_MAX)
+    {
+        fprintf(stderr, "[Host] tick_ms and tick_report_period must fit in uint16.\n");
+        return -1;
+    }
+
+    scheduler_process_args_t scheduler_args = {
+        .planner = planner};
+
+    if (process_manager_create(&process_manager, scheduler_process, &scheduler_args) < 0)
+        return -1;
+
+    const char *configured_ports[HOST_NODE_COUNT] = {
+        config->node1_port,
+        config->node2_port};
+    for (int i = 0; i < HOST_NODE_COUNT; i++)
+    {
+        node_driver_args_t driver_args = {
+            .node_id = i + 1,
+            .tty_device = configured_ports[i],
+            .tx_rb = shared_memory_tx_ring_buffer(shared_memory, i + 1),
+            .shm_name = SHM_NAME,
+            .driver_config = {
+                .tick_ms = (uint16_t)config->tick_ms,
+                .algorithm = config->algorithm == SCHED_EDF
+                                 ? ALGORITHM_EDF
+                                 : ALGORITHM_RMS,
+                .report_period = (uint16_t)config->tick_report_period}};
+        if (driver_args.tx_rb == NULL)
+        {
+            perror("[Host] No se pudo obtener el buffer del driver");
+            return -1;
+        }
+
+        if (process_manager_create(&process_manager, node_driver_process, &driver_args) < 0)
+            return -1;
+    }
+
+    if (process_manager_create(&process_manager, report_process, shared_memory) < 0)
+        return -1;
+
+    return 0;
+}
+
+static void destroy_shared_state(shared_memory_t *shared_memory)
+{
+    if (shared_memory != NULL && shared_memory->data != NULL)
+    {
+        if (shared_memory_destroy(shared_memory) < 0)
+            perror("[Host] Error destruyendo la memoria compartida");
+    }
+}
+
+int main(int argc, char *argv[])
+{
+    setvbuf(stdout, NULL, _IONBF, 0);
+
+    Config config;
+    PlannerState planner;
+    TaskAssignment assignments[MAX_TASKS];
+    int task_count = 0;
+
+    if (process_manager_init(&process_manager) != 0)
+    {
+        perror("[Host] No se pudo inicializar el administrador de procesos");
+        return EXIT_FAILURE;
+    }
+
+    if (initialize_planner(argc,
+                           argv,
+                           &config,
+                           &planner,
+                           assignments,
+                           &task_count) != 0)
+        return EXIT_FAILURE;
+
+    (void)task_count;
+
+    shared_memory_t shared_memory;
+    if (create_shared_state(&planner, &shared_memory) != 0)
+        return EXIT_FAILURE;
+
+    if (process_manager_install_signal_handlers(&process_manager) != 0)
+    {
+        perror("[Host] No se pudieron instalar los manejadores de señales");
+        destroy_shared_state(&shared_memory);
+        return EXIT_FAILURE;
+    }
+
+    printf("[Host] Orquestador iniciado (PID: %ld).\n", (long)getpid());
+
+    if (launch_processes(&config, &planner, &shared_memory) != 0)
+    {
+        process_manager_stop(&process_manager);
+        process_manager_wait(&process_manager);
+        destroy_shared_state(&shared_memory);
+        return EXIT_FAILURE;
+    }
+
+    printf("[Host] Scheduler, dos drivers y proceso de reporte iniciados.\n");
+    int exit_status = process_manager_wait(&process_manager);
+    destroy_shared_state(&shared_memory);
+    printf("[Host] Apagado completo.\n");
+
+    return exit_status;
 }

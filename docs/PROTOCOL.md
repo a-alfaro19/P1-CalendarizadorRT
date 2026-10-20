@@ -263,3 +263,21 @@ Si el mensaje es de un tipo que lleva ACK, el nodo responde con `status` = 1.
 
 Host y nodos deben usar la misma configuración. La velocidad se define en el
 archivo de configuración; los demás parámetros son fijos.
+
+El firmware comparte la lógica del driver y del calendarizador entre ESP32 y
+Raspberry Pi Pico. Solo cambia el adaptador del puerto UART. Los pines por
+defecto del adaptador Arduino son:
+
+| Placa | RX del nodo | TX del nodo |
+| ----- | ----------- | ----------- |
+| ESP32 DevKit (`esp32dev`) | GPIO 16 | GPIO 17 |
+| Raspberry Pi Pico | GP1 | GP0 |
+
+Conecta TX del adaptador del host a RX del nodo, RX del host a TX del nodo y
+une las tierras (GND). La UART usa niveles lógicos de 3.3 V; no conectes una
+señal RS-232 de voltaje positivo/negativo directamente a los pines de la placa.
+Si se usan pines distintos, cambia la inicialización de `Serial1` en
+`src/node/node.cpp`.
+
+Desde la raíz del repositorio, el firmware se compila con
+`pio run -d src/node -e esp32` o `pio run -d src/node -e pico`.

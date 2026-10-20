@@ -23,7 +23,7 @@ SCHEDULER_SRCS := $(shell find src/host/scheduler -name "*.c")
 SCHEDULER_OBJS := $(patsubst src/host/scheduler/%.c,$(BUILD_DIR)/obj/host/scheduler/%.o,$(SCHEDULER_SRCS))
 
 # Host Commons objects
-HOST_COMM_SRCS := src/host/ring_buffer.c src/host/shared_memory.c src/host/node_driver.c
+HOST_COMM_SRCS := src/host/ring_buffer.c src/host/shared_memory.c src/host/node_driver.c src/host/process_manager.c
 HOST_COMM_OBJS := $(patsubst src/host/%.c,$(BUILD_DIR)/obj/host/comm/%.o,$(HOST_COMM_SRCS))
 
 # Host binary
@@ -35,6 +35,7 @@ TEST_SRCS := $(wildcard $(TEST_DIR)/*_tests.c)
 TEST_BINS := $(patsubst $(TEST_DIR)/%.c,$(BUILD_DIR)/$(TEST_DIR)/%,$(TEST_SRCS))
 NODE_SCHEDULER_SRCS := src/node/scheduler/calendarizador.c src/node/scheduler/evq.c
 NODE_SCHEDULER_HEADERS := include/node/scheduler/calendarizador.h include/node/scheduler/evq.h include/node/scheduler/sched_config.h
+NODE_DRIVER_CORE_SRCS := src/node/node_driver.c $(NODE_SCHEDULER_SRCS) $(PROTOCOL_SRCS)
 
 .DEFAULT_GOAL := all
 .PHONY: all host test-all clean
@@ -83,6 +84,11 @@ $(HOST_BIN): $(HOST_SRC) $(LIB_PROTOCOL) $(LIB_HOST_COMM) $(LIB_SCHEDULER)
 $(BUILD_DIR)/$(TEST_DIR)/node_scheduler_tests: $(TEST_DIR)/node_scheduler_tests.c $(NODE_SCHEDULER_SRCS) $(NODE_SCHEDULER_HEADERS) $(TEST_DIR)/test_harness.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(SANFLAGS) -Iinclude/node/scheduler -Itests $< $(NODE_SCHEDULER_SRCS) -o $@
+
+# Portable node driver core tests
+$(BUILD_DIR)/$(TEST_DIR)/node_driver_core_tests: $(TEST_DIR)/node_driver_core_tests.c $(NODE_DRIVER_CORE_SRCS) $(HEADERS) $(TEST_DIR)/test_harness.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(SANFLAGS) -Iinclude/node/scheduler -Itests $< $(NODE_DRIVER_CORE_SRCS) -o $@
 
 # Generic compilation for any test
 $(BUILD_DIR)/$(TEST_DIR)/%: $(TEST_DIR)/%.c $(LIB_PROTOCOL) $(LIB_HOST_COMM) $(LIB_SCHEDULER) $(HEADERS)
