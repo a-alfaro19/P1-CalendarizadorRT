@@ -2,5 +2,10 @@ build/
 libs/
 bin/
 
-# Arduino #
+# Arduino 
 .pio/
+get-platformio.py
+
+# VS Code
+.vscode/
+
