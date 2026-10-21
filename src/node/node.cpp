@@ -3,6 +3,10 @@
 #include "node/measure/medicion.h"
 #include "node/node_driver.h"
 
+#if !defined(LED_BUILTIN) && defined(ARDUINO_ARCH_ESP32)
+#define LED_BUILTIN 2
+#endif
+
 extern "C" {
 #include "node/ut/ut.h"
 }
@@ -13,10 +17,18 @@ node_driver_t driver;
 
 int read_serial_byte(void *, uint8_t *byte)
 {
+#if defined(ARDUINO_ARCH_ESP8266)
+    if (Serial.available() <= 0)
+#else
     if (Serial1.available() <= 0)
+#endif
         return 0;
 
+#if defined(ARDUINO_ARCH_ESP8266)
+    int received = Serial.read();
+#else
     int received = Serial1.read();
+#endif
     if (received < 0)
         return -1;
 
@@ -26,7 +38,11 @@ int read_serial_byte(void *, uint8_t *byte)
 
 int write_serial_bytes(void *, const uint8_t *bytes, size_t length)
 {
+#if defined(ARDUINO_ARCH_ESP8266)
+    return Serial.write(bytes, length) == length ? 0 : -1;
+#else
     return Serial1.write(bytes, length) == length ? 0 : -1;
+#endif
 }
 
 uint32_t board_now_us(void *)
@@ -58,6 +74,8 @@ void setup()
 
 #if defined(ARDUINO_ARCH_ESP32)
     Serial1.begin(115200, SERIAL_8N1, 16, 17);
+#elif defined(ARDUINO_ARCH_ESP8266)
+    Serial.begin(115200);
 #elif defined(ARDUINO_ARCH_RP2040)
     Serial1.setRX(1);
     Serial1.setTX(0);
@@ -76,7 +94,9 @@ void setup()
 
     if (node_driver_init(&driver, &io) != 0)
     {
+#if !defined(ARDUINO_ARCH_ESP8266)
         Serial.println("Node driver initialization failed");
+#endif
         while (true)
             delay(1000);
     }
@@ -86,7 +106,9 @@ void loop()
 {
     if (node_driver_poll(&driver) != 0)
     {
+#if !defined(ARDUINO_ARCH_ESP8266)
         Serial.println("Node driver I/O error");
+#endif
         while (true)
             delay(1000);
     }

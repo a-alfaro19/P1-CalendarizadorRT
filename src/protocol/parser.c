@@ -1,6 +1,8 @@
 #include "protocol/parser.h"
 #include "protocol/protocol.h"
 
+#include <string.h>
+
 void protocol_parser_init(protocol_parser_t *parser)
 {
     if (parser == NULL)

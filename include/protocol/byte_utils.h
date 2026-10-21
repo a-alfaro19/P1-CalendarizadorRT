@@ -8,7 +8,7 @@
  * @param p Pointer to the destination byte buffer (at least 2 bytes).
  * @param v The 16-bit value to write.
  */
-static void put16(uint8_t *p, uint16_t v)
+static inline void put16(uint8_t *p, uint16_t v)
 {
     p[0] = (uint8_t)(v & 0xFF);
     p[1] = (uint8_t)(v >> 8);
@@ -20,7 +20,7 @@ static void put16(uint8_t *p, uint16_t v)
  * @param p Pointer to the destination byte buffer (at least 4 bytes).
  * @param v The 32-bit value to write.
  */
-static void put32(uint8_t *p, uint32_t v)
+static inline void put32(uint8_t *p, uint32_t v)
 {
     p[0] = (uint8_t)(v & 0xFF);
     p[1] = (uint8_t)((v >> 8) & 0xFF);
@@ -34,7 +34,7 @@ static void put32(uint8_t *p, uint32_t v)
  * @param p Pointer to the source byte buffer.
  * @return The 16-bit decoded value.
  */
-static uint16_t get16(const uint8_t *p)
+static inline uint16_t get16(const uint8_t *p)
 {
     return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
 }
@@ -45,7 +45,7 @@ static uint16_t get16(const uint8_t *p)
  * @param p Pointer to the source byte buffer.
  * @return The 32-bit decoded value.
  */
-static uint32_t get32(const uint8_t *p)
+static inline uint32_t get32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }

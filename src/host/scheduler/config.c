@@ -99,9 +99,12 @@ static int parse_config_entry(Config *config,
 
     else if (strcmp(key, "node2_port") == 0)
     {
-        copy_string(config->node2_port,
-                    sizeof(config->node2_port),
-                    value);
+        if (strcmp(value, "none") == 0)
+            config->node2_port[0] = '\0';
+        else
+            copy_string(config->node2_port,
+                        sizeof(config->node2_port),
+                        value);
     }
 
     else if (strcmp(key, "tick_report_period") == 0)
@@ -151,10 +154,9 @@ static int validate_config(const Config *config)
         return -1;
     }
 
-    if (config->node1_port[0] == '\0' ||
-        config->node2_port[0] == '\0')
+    if (config->node1_port[0] == '\0')
     {
-        fprintf(stderr, "Falta indicar uno de los puertos seriales\n");
+        fprintf(stderr, "Falta indicar node1_port\n");
         return -1;
     }
 

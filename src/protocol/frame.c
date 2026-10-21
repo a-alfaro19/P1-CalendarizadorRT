@@ -2,6 +2,8 @@
 #include "protocol/protocol.h"
 #include "protocol/byte_utils.h"
 
+#include <string.h>
+
 int protocol_frame_build(uint8_t *out, size_t capacity, uint8_t type,
                          const uint8_t *load, size_t load_len)
 {

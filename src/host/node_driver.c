@@ -11,6 +11,7 @@
 #include <sys/select.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <termios.h>
 
 #define READ_BUF_SIZE 128
 
@@ -280,6 +281,33 @@ static int setup_tty_device(const char *tty_device)
         perror("[Error Driver] Could not open the TTY device");
         exit(EXIT_FAILURE);
     }
+
+    struct termios tty;
+    if (tcgetattr(tty_fd, &tty) != 0)
+    {
+        perror("[Error Driver] Could not read TTY settings");
+        close(tty_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    cfmakeraw(&tty);
+    if (cfsetispeed(&tty, B115200) != 0 ||
+        cfsetospeed(&tty, B115200) != 0)
+    {
+        perror("[Error Driver] Could not set TTY baud rate");
+        close(tty_fd);
+        exit(EXIT_FAILURE);
+    }
+    tty.c_cflag |= CLOCAL | CREAD;
+    tty.c_cc[VMIN] = 1;
+    tty.c_cc[VTIME] = 0;
+    if (tcsetattr(tty_fd, TCSANOW, &tty) != 0)
+    {
+        perror("[Error Driver] Could not apply TTY settings");
+        close(tty_fd);
+        exit(EXIT_FAILURE);
+    }
+
     return tty_fd;
 }
 

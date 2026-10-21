@@ -35,6 +35,7 @@ typedef struct
 } scheduler_process_args_t;
 
 static process_manager_t process_manager;
+static int configured_node_count = HOST_NODE_COUNT;
 
 static int parse_node_speed(const char *text, int *speed)
 {
@@ -78,33 +79,39 @@ static int initialize_planner(int argc,
                               TaskAssignment assignments[],
                               int *task_count)
 {
-    if (argc != 4 && argc != 6)
+    if (load_config(argv[1], config) != 0)
+        return -1;
+
+    configured_node_count = config->node2_port[0] == '\0' ? 1 : HOST_NODE_COUNT;
+    int expected_argc = configured_node_count + 2;
+    bool has_failure_option = argc == expected_argc + 2;
+    if (argc != expected_argc && !has_failure_option)
     {
         fprintf(stderr,
-                "Uso: %s <config> <vel_nodo1> <vel_nodo2> [--fail nodo]\n",
+                "Uso: %s <config> <vel_nodo1> [vel_nodo2] [--fail nodo]\n",
                 argv[0]);
         return -1;
     }
 
-    if (argc == 6 && strcmp(argv[4], "--fail") != 0)
+    int failure_option_index = expected_argc;
+    if (has_failure_option && strcmp(argv[failure_option_index], "--fail") != 0)
     {
-        fprintf(stderr, "[Host] Opción inválida: %s\n", argv[4]);
+        fprintf(stderr, "[Host] Opción inválida: %s\n", argv[failure_option_index]);
         return -1;
     }
 
-    if (load_config(argv[1], config) != 0)
+    int node_speeds[HOST_NODE_COUNT] = {0};
+    if (parse_node_speed(argv[2], &node_speeds[0]) != 0)
         return -1;
-
-    int node_speeds[HOST_NODE_COUNT];
-    if (parse_node_speed(argv[2], &node_speeds[0]) != 0 ||
+    if (configured_node_count == HOST_NODE_COUNT &&
         parse_node_speed(argv[3], &node_speeds[1]) != 0)
         return -1;
 
-    NodeInfo nodes[HOST_NODE_COUNT] = {
-        {1, node_speeds[0], 1},
-        {2, node_speeds[1], 1}};
+    NodeInfo nodes[HOST_NODE_COUNT] = {0};
+    for (int i = 0; i < configured_node_count; i++)
+        nodes[i] = (NodeInfo){i + 1, node_speeds[i], 1};
 
-    if (planner_init(planner, nodes, HOST_NODE_COUNT, config) != 0)
+    if (planner_init(planner, nodes, configured_node_count, config) != 0)
     {
         fprintf(stderr, "[Host] No se pudo inicializar el planificador\n");
         return -1;
@@ -265,7 +272,7 @@ static void report_process(void *arg)
         if (process_manager_shutdown_requested(&process_manager))
             break;
 
-        for (int node_id = 1; node_id <= HOST_NODE_COUNT; node_id++)
+        for (int node_id = 1; node_id <= configured_node_count; node_id++)
         {
             shared_node_status_t status;
             if (shared_memory_read_node_status(shared_memory, node_id, &status) != 0)
@@ -316,10 +323,9 @@ static int launch_processes(const Config *config,
     if (process_manager_create(&process_manager, scheduler_process, &scheduler_args) < 0)
         return -1;
 
-    const char *configured_ports[HOST_NODE_COUNT] = {
-        config->node1_port,
-        config->node2_port};
-    for (int i = 0; i < HOST_NODE_COUNT; i++)
+    const char *configured_ports[HOST_NODE_COUNT] = {config->node1_port,
+                                                     config->node2_port};
+    for (int i = 0; i < configured_node_count; i++)
     {
         node_driver_args_t driver_args = {
             .node_id = i + 1,
@@ -403,7 +409,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    printf("[Host] Scheduler, dos drivers y proceso de reporte iniciados.\n");
+    printf("[Host] Scheduler, %d driver(s) y proceso de reporte iniciados.\n",
+           configured_node_count);
     int exit_status = process_manager_wait(&process_manager);
     destroy_shared_state(&shared_memory);
     printf("[Host] Apagado completo.\n");
