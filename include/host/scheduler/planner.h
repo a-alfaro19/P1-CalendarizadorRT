@@ -43,7 +43,21 @@ typedef struct
 int planner_init(PlannerState *state,
                  const NodeInfo nodes[],
                  int node_count,
-                 const Config *config);
+                 const HostConfig *config);
+
+/*
+ * Loads the host configuration, validates and parses node speeds, initializes
+ * the planner, loads tasks, and performs their initial assignment.
+ * Returns 0 on success or -1 if any initialization step fails.
+ */
+int planner_initialize(PlannerState *state,
+                       HostConfig *config,
+                       const char *config_path,
+                       const char *node_speed_args[],
+                       int node_speed_count,
+                       TaskAssignment assignments[],
+                       int *task_count,
+                       int *accepted_count);
 
 int planner_add_task(PlannerState *state,
                      const Task *task,

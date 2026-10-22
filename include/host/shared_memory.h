@@ -12,7 +12,7 @@
 #define SHARED_MAX_TASKS_PER_NODE 10
 
 /** Maximum number of nodes represented in shared memory. */
-#define SHARED_NUM_NODES 4
+#define SHARED_NUM_NODES 2
 
 /** Maximum length of a shared memory object name, including its terminator. */
 #define SHARED_MEMORY_NAME_MAX 128
@@ -22,12 +22,12 @@
  */
 typedef struct
 {
-    uint8_t task_id;      /**< Task identifier. */
-    uint8_t kind;         /**< Task execution kind. */
-    uint16_t cost_ticks;  /**< Execution cost in ticks. */
-    uint16_t period;      /**< Task period or minimum sporadic interval. */
-    uint16_t deadline;    /**< Relative deadline in ticks. */
-    bool assigned;        /**< Whether the task has been assigned to its node. */
+    uint8_t task_id;     /**< Task identifier. */
+    uint8_t kind;        /**< Task execution kind. */
+    uint16_t cost_ticks; /**< Execution cost in ticks. */
+    uint16_t period;     /**< Task period or minimum sporadic interval. */
+    uint16_t deadline;   /**< Relative deadline in ticks. */
+    bool assigned;       /**< Whether the task has been assigned to its node. */
 } task_config_t;
 
 /**
@@ -35,8 +35,8 @@ typedef struct
  */
 typedef struct
 {
-    int node_id; /**< Node identifier. */
-    int task_count; /**< Number of configured tasks. */
+    int node_id;                                    /**< Node identifier. */
+    int task_count;                                 /**< Number of configured tasks. */
     task_config_t tasks[SHARED_MAX_TASKS_PER_NODE]; /**< Configured tasks. */
 } node_task_list_t;
 
@@ -53,15 +53,15 @@ typedef struct
  */
 typedef struct
 {
-    bool active; /**< Whether the node is active. */
-    uint32_t last_tick; /**< Most recent tick reported by the node. */
-    uint16_t bad_frames; /**< Invalid frames reported by the node. */
-    uint32_t missed_reports; /**< Consecutive reports missed by the node. */
-    uint64_t completed_tasks; /**< Completed task count. */
-    uint64_t missed_deadlines; /**< Missed deadline count. */
+    bool active;                        /**< Whether the node is active. */
+    uint32_t last_tick;                 /**< Most recent tick reported by the node. */
+    uint16_t bad_frames;                /**< Invalid frames reported by the node. */
+    uint32_t missed_reports;            /**< Consecutive reports missed by the node. */
+    uint64_t completed_tasks;           /**< Completed task count. */
+    uint64_t missed_deadlines;          /**< Missed deadline count. */
     uint64_t ignored_sporadic_triggers; /**< Ignored sporadic trigger count. */
-    bool has_last_event; /**< Whether a node event has been recorded. */
-    msg_event_t last_event; /**< Most recently recorded node event. */
+    bool has_last_event;                /**< Whether a node event has been recorded. */
+    msg_event_t last_event;             /**< Most recently recorded node event. */
 } shared_node_status_t;
 
 /**
@@ -69,11 +69,11 @@ typedef struct
  */
 typedef struct
 {
-    uint32_t magic; /**< Shared memory format marker. */
-    shared_system_config_t config; /**< Task configuration. */
-    shared_node_status_t nodes[SHARED_NUM_NODES]; /**< Per-node runtime status. */
+    uint32_t magic;                                  /**< Shared memory format marker. */
+    shared_system_config_t config;                   /**< Task configuration. */
+    shared_node_status_t nodes[SHARED_NUM_NODES];    /**< Per-node runtime status. */
     ring_buffer_t tx_ring_buffers[SHARED_NUM_NODES]; /**< Per-node transmit buffers. */
-    sem_t mutex; /**< Shared access semaphore. */
+    sem_t mutex;                                     /**< Shared access semaphore. */
 } shared_memory_data_t;
 
 /**
@@ -81,11 +81,11 @@ typedef struct
  */
 typedef struct
 {
-    int fd; /**< Object file descriptor. */
-    size_t size; /**< Mapped object size in bytes. */
-    bool owner; /**< Whether this process created the object. */
+    int fd;                            /**< Object file descriptor. */
+    size_t size;                       /**< Mapped object size in bytes. */
+    bool owner;                        /**< Whether this process created the object. */
     char name[SHARED_MEMORY_NAME_MAX]; /**< Shared memory object name. */
-    shared_memory_data_t *data; /**< Mapped shared data. */
+    shared_memory_data_t *data;        /**< Mapped shared data. */
 } shared_memory_t;
 
 /**

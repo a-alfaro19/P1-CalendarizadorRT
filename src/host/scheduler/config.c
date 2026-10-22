@@ -27,7 +27,7 @@ static void copy_string(char *dest, size_t dest_size, const char *src)
 }
 
 /* Valores iniciales */
-static void set_default_config(Config *config)
+static void set_default_config(HostConfig *config)
 {
     config->algorithm = SCHED_EDF;
     config->heuristic = HEURISTIC_FIRST_FIT;
@@ -47,7 +47,7 @@ static void set_default_config(Config *config)
  * Procesa una linea key=value del archivo de config
  * Retorna 0 si la clave es valida y -1 si no se reconoce
  */
-static int parse_config_entry(Config *config,
+static int parse_config_entry(HostConfig *config,
                               const char *key,
                               const char *value)
 {
@@ -134,7 +134,7 @@ static int parse_config_entry(Config *config,
 }
 
 /* Comprueba que los valores obligatorios tengan sentido */
-static int validate_config(const Config *config)
+static int validate_config(const HostConfig *config)
 {
     if (config->tick_ms <= 0)
     {
@@ -169,7 +169,7 @@ static int validate_config(const Config *config)
     return 0;
 }
 
-int load_config(const char *filename, Config *config)
+int load_config(const char *filename, HostConfig *config)
 {
     if (config == NULL)
     {

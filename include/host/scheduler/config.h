@@ -35,7 +35,7 @@ typedef struct
     int max_missed_reports;
 
     char task_file[MAX_PATH_LENGTH];
-} Config;
+} HostConfig;
 
 /*
  * Carga la config desde un archivo
