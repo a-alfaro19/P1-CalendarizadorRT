@@ -18,6 +18,29 @@
 #define SCHEDULER_REPORT_INTERVAL_SECONDS 5 //< Interval in seconds for the scheduler report process to print status.
 
 /**
+ * @brief Arguments for the host application.
+ */
+typedef struct
+{
+    const char *config_path;                          ///< Path to the configuration file.
+    const char *node_speed_args[HOST_MAX_NODE_COUNT]; ///< Array of node speed arguments.
+    int node_speed_count;                             ///< Number of node speed arguments.
+} host_arguments_t;
+
+// ===================================
+// Child process arguments structures
+// ===================================
+
+/**
+ * @brief Arguments for the scheduler process.
+ */
+typedef struct
+{
+    const PlannerState *planner;    //< Pointer to the planner state structure.
+    shared_memory_t *shared_memory; ///< Pointer to the shared memory handle for the system configuration.
+} scheduler_process_args_t;         // TODO: Use shared memory in the scheduler process instead of passing the planner state directly.
+
+/**
  * @brief Arguments for the node driver process.
  */
 typedef struct
@@ -29,32 +52,21 @@ typedef struct
     node_driver_config_t driver_config; ///< Configuration parameters for the node driver.
 } node_driver_args_t;
 
-/**
- * @brief Arguments for the scheduler process.
- */
-typedef struct
-{
-    const PlannerState *planner;    //< Pointer to the planner state structure.
-    shared_memory_t *shared_memory; ///< Pointer to the shared memory handle for the system configuration.
-} scheduler_process_args_t;         // TODO: Use shared memory in the scheduler process instead of passing the planner state directly.
-
-typedef struct
+typedef struct // TODO: Update when report process is implemented.
 {
     shared_memory_t *shared_memory;
     int node_count;
 } report_process_args_t;
 
-/**
- * @brief Arguments for the host application.
- */
-typedef struct
-{
-    const char *config_path;                          ///< Path to the configuration file.
-    const char *node_speed_args[HOST_MAX_NODE_COUNT]; ///< Array of node speed arguments.
-    int node_speed_count;                             ///< Number of node speed arguments.
-} host_arguments_t;
+// ===================================
+// Global process manager instance
+// ===================================
 
 static process_manager_t process_manager; //< Process manager for managing child processes (scheduler, node drivers, and report process).
+
+// =================================
+// Helper functions
+// =================================
 
 /**
  * @brief Prints the assignment of a task to a node.
@@ -134,84 +146,9 @@ static int parse_arguments(int argc, char *argv[], host_arguments_t *arguments)
     return 0;
 }
 
-/**
- * @brief Copies the planner state to the shared memory configuration structure.
- *
- * @param planner Pointer to the planner state structure.
- * @param config Pointer to the shared memory configuration structure.
- * @return 0 on success, -1 on failure.
- */
-static int copy_planner_state_to_shared_memory_config(const PlannerState *planner,
-                                                      shared_system_config_t *config)
-{
-    // Validate node count against shared memory capacity
-    if (planner->node_count < 0 || planner->node_count > SHARED_NUM_NODES)
-    {
-        fprintf(stderr, "[Host] Cantidad de nodos fuera de capacidad de memoria compartida\n");
-        return -1;
-    }
-
-    // Clean nodes state on shared memory config
-    for (int i = 0; i < SHARED_NUM_NODES; i++)
-    {
-        config->nodes[i].node_id = -1;
-        config->nodes[i].task_count = 0;
-    }
-
-    for (int node_index = 0; node_index < planner->node_count; node_index++) // for each node
-    {
-        // Read the node plan from planner state
-        const NodePlan *plan = &planner->nodes[node_index];
-
-        // Validate node task count against shared memory capacity
-        if (plan->task_count < 0 ||
-            plan->task_count > SHARED_MAX_TASKS_PER_NODE)
-        {
-            fprintf(stderr,
-                    "[Host] Nodo %d tiene %d tareas, pero la memoria compartida permite %d\n",
-                    plan->info.id,
-                    plan->task_count,
-                    SHARED_MAX_TASKS_PER_NODE);
-            return -1;
-        }
-
-        // Copy node information to shared memory configuration
-        node_task_list_t *node_list = &config->nodes[node_index];
-        node_list->node_id = plan->info.id;
-        node_list->task_count = plan->task_count;
-
-        for (int task_index = 0; task_index < plan->task_count; task_index++) // for each task
-        {
-            // Read task from the node plan
-            const Task *task = &plan->tasks[task_index];
-            const int cost_ticks = plan->costs[task_index];
-
-            // Validate task parameters
-            if (task->id < 0 || task->id >= UINT8_MAX ||
-                cost_ticks < 0 || cost_ticks > UINT16_MAX ||
-                task->period <= 0 || task->period > UINT16_MAX ||
-                task->deadline <= 0 || task->deadline > UINT16_MAX)
-            {
-                fprintf(stderr,
-                        "[Host] Parámetros fuera de rango para la tarea %d del nodo %d\n",
-                        task->id,
-                        plan->info.id);
-                return -1;
-            }
-
-            // Copy task configuration to shared memory
-            task_config_t *shared_task = &node_list->tasks[task_index];
-            shared_task->task_id = (uint8_t)task->id;
-            shared_task->kind = (uint8_t)task->type;
-            shared_task->cost_ticks = (uint16_t)cost_ticks;
-            shared_task->period = (uint16_t)task->period;
-            shared_task->deadline = (uint16_t)task->deadline;
-            shared_task->assigned = false;
-        }
-    }
-
-    return 0;
-}
+// =================================
+// Child process functions
+// =================================
 
 /**
  * @brief Function executed by the scheduler process
@@ -300,21 +237,21 @@ static void report_process(void *arg)
     }
 }
 
+/**
+ * @brief Launches the scheduler, node driver, and report processes.
+ *
+ * @param config Pointer to the HostConfig structure.
+ * @param planner Pointer to the PlannerState structure.
+ * @param shared_memory Pointer to the shared_memory_t structure.
+ * @return 0 on success, -1 on failure.
+ */
 static int launch_processes(const HostConfig *config,
                             const PlannerState *planner,
                             shared_memory_t *shared_memory)
 {
-    if (config->tick_ms > UINT16_MAX ||
-        config->tick_report_period > UINT16_MAX)
-    {
-        fprintf(stderr, "[Host] tick_ms and tick_report_period must fit in uint16.\n");
-        return -1;
-    }
-
+    // Create scheduler process
     scheduler_process_args_t scheduler_args = {
         .planner = planner};
-
-    // Create scheduler process
     if (process_manager_create(&process_manager, scheduler_process, &scheduler_args) < 0)
         return -1;
 
@@ -345,11 +282,95 @@ static int launch_processes(const HostConfig *config,
             return -1;
     }
 
+    // Create report process
     report_process_args_t report_args = {
         .shared_memory = shared_memory,
         .node_count = planner->node_count};
     if (process_manager_create(&process_manager, report_process, &report_args) < 0)
         return -1;
+
+    return 0;
+}
+
+// ===================================
+// Shared memory management functions
+// ===================================
+
+/**
+ * @brief Copies the planner state to the shared memory configuration structure.
+ *
+ * @param planner Pointer to the planner state structure.
+ * @param config Pointer to the shared memory configuration structure.
+ * @return 0 on success, -1 on failure.
+ */
+static int copy_planner_state_to_shared_memory_config(const PlannerState *planner,
+                                                      shared_system_config_t *config)
+{
+    // Validate node count against shared memory capacity
+    if (planner->node_count < 0 || planner->node_count > SHARED_NUM_NODES)
+    {
+        fprintf(stderr, "[Host] Cantidad de nodos fuera de capacidad de memoria compartida\n");
+        return -1;
+    }
+
+    // Clean nodes state on shared memory config
+    for (int i = 0; i < SHARED_NUM_NODES; i++)
+    {
+        config->nodes[i].node_id = -1;
+        config->nodes[i].task_count = 0;
+    }
+
+    for (int node_index = 0; node_index < planner->node_count; node_index++) // for each node
+    {
+        // Read the node plan from planner state
+        const NodePlan *plan = &planner->nodes[node_index];
+
+        // Validate node task count against shared memory capacity
+        if (plan->task_count < 0 ||
+            plan->task_count > SHARED_MAX_TASKS_PER_NODE)
+        {
+            fprintf(stderr,
+                    "[Host] Nodo %d tiene %d tareas, pero la memoria compartida permite %d\n",
+                    plan->info.id,
+                    plan->task_count,
+                    SHARED_MAX_TASKS_PER_NODE);
+            return -1;
+        }
+
+        // Copy node information to shared memory configuration
+        node_task_list_t *node_list = &config->nodes[node_index];
+        node_list->node_id = plan->info.id;
+        node_list->task_count = plan->task_count;
+
+        for (int task_index = 0; task_index < plan->task_count; task_index++) // for each task
+        {
+            // Read task from the node plan
+            const Task *task = &plan->tasks[task_index];
+            const int cost_ticks = plan->costs[task_index];
+
+            // Validate task parameters
+            if (task->id < 0 || task->id >= UINT8_MAX ||
+                cost_ticks < 0 || cost_ticks > UINT16_MAX ||
+                task->period <= 0 || task->period > UINT16_MAX ||
+                task->deadline <= 0 || task->deadline > UINT16_MAX)
+            {
+                fprintf(stderr,
+                        "[Host] Parámetros fuera de rango para la tarea %d del nodo %d\n",
+                        task->id,
+                        plan->info.id);
+                return -1;
+            }
+
+            // Copy task configuration to shared memory
+            task_config_t *shared_task = &node_list->tasks[task_index];
+            shared_task->task_id = (uint8_t)task->id;
+            shared_task->kind = (uint8_t)task->type;
+            shared_task->cost_ticks = (uint16_t)cost_ticks;
+            shared_task->period = (uint16_t)task->period;
+            shared_task->deadline = (uint16_t)task->deadline;
+            shared_task->assigned = false;
+        }
+    }
 
     return 0;
 }
@@ -390,6 +411,21 @@ static int create_shared_state(const PlannerState *planner,
     return 0;
 }
 
+/**
+ * @brief Destroys the shared memory state.
+ *
+ * @param shared_memory Shared memory handle to destroy.
+ */
+static void destroy_shared_state(shared_memory_t *shared_memory)
+{
+    if (shared_memory_destroy(shared_memory) < 0)
+        perror("[Host] Error destruyendo la memoria compartida");
+}
+
+// =================================
+// Main function
+// =================================
+
 int main(int argc, char *argv[])
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -397,8 +433,6 @@ int main(int argc, char *argv[])
     HostConfig config;
     PlannerState planner;
     TaskAssignment assignments[MAX_TASKS];
-    int task_count = 0;
-    int accepted_count = 0;
 
     // Parse command-line arguments
     host_arguments_t arguments = {0};
@@ -413,6 +447,8 @@ int main(int argc, char *argv[])
     }
 
     // Initialize Scheduler
+    int task_count = 0;
+    int accepted_count = 0;
     if (planner_initialize(&planner,
                            &config,
                            arguments.config_path,
@@ -456,8 +492,7 @@ int main(int argc, char *argv[])
     int exit_status = process_manager_wait(&process_manager);
 
     // Cleanup resources
-    if (shared_memory_destroy(&shared_memory) < 0)
-        perror("[Host] Error destruyendo la memoria compartida");
+    destroy_shared_state(&shared_memory);
 
     printf("[Host] Apagado por completo.\n");
     return exit_status;

@@ -44,4 +44,4 @@ typedef struct
  *   0  : configuración cargada correctamente
  *   -1 : error de lectura o config invalida
  */
-int load_config(const char *filename, Config *config);
+int load_config(const char *filename, HostConfig *config);
