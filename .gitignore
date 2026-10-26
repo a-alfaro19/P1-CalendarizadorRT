@@ -9,3 +9,5 @@ get-platformio.py
 # VS Code
 .vscode/
 
+# Logs
+*.log

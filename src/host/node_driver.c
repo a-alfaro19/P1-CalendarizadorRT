@@ -13,7 +13,7 @@
 #include <sys/stat.h>
 #include <termios.h>
 
-#define READ_BUF_SIZE 128
+#define READ_BUF_SIZE 128 // Size of the buffer used for reading bytes from the TTY device.
 
 /**
  * @brief Represents the protocol states for the host communication state machine.
@@ -27,7 +27,8 @@ typedef enum
     DRIVER_STATE_WAITING_TICK_REPORT, /**< Active runtime state: listening for heartbeats (0x05) and events (0x04). */
     DRIVER_STATE_SPORADIC_TASK,       /**< Injecting a sporadic task simulation trigger (0x06). */
     DRIVER_STATE_STOP,                /**< Ordering node termination or shutdown (0x07). */
-    DRIVER_STATE_WAITING_ACK,         /**< Waiting for a protocol acknowledgment (0x08) from the node. */
+    DRIVER_STATE_WAITING_TASK_ACK,    /**< Waiting for task deployment acknowledgment. */
+    DRIVER_STATE_WAITING_START_ACK,   /**< Waiting for start acknowledgment. */
 } driver_state_t;
 
 /**
@@ -39,7 +40,7 @@ typedef enum
  * @param load_len Size in bytes of the message payload.
  * @return true if the frame was successfully built and fully pushed to the ring buffer, false otherwise.
  */
-static bool driver_send_frame(ring_buffer_t *tx_rb, uint8_t msg_type, const uint8_t *load, size_t load_len)
+static bool driver_send_frame_to_rb(ring_buffer_t *tx_rb, uint8_t msg_type, const uint8_t *load, size_t load_len)
 {
     // Build frame
     uint8_t frame_buffer[PROTOCOL_MAX_FRAME_SIZE];
@@ -71,7 +72,7 @@ static bool driver_send_frame(ring_buffer_t *tx_rb, uint8_t msg_type, const uint
  * @param tx_rb Pointer to the transmission ring buffer where outgoing protocol frames are pushed.
  * @param state Pointer to the current driver state variable, which is updated during protocol execution.
  * @param parsed_frame Pointer to the incoming protocol frame received from the node (can be NULL for initial state triggers).
- * @param shm_base Pointer to the base address of the mapped shared memory region used to query unassigned tasks.
+ * @param shared_memory Pointer to the mapped shared memory region used to query unassigned tasks.
  * @return None (void).
  */
 static void handle_state_machine(int node_id,
@@ -92,7 +93,7 @@ static void handle_state_machine(int node_id,
             int load_len = msg_calib_req_pack(&req, load, sizeof(load));
 
             // Send frame to the ring buffer
-            if (driver_send_frame(tx_rb, MSG_CALIB_REQ, load, (size_t)load_len))
+            if (driver_send_frame_to_rb(tx_rb, MSG_CALIB_REQ, load, (size_t)load_len))
             {
                 *state = DRIVER_STATE_WAITING_CALIB;
             }
@@ -108,11 +109,19 @@ static void handle_state_machine(int node_id,
                 perror("[Driver Error] Could not update shared node state");
             *state = DRIVER_STATE_DEPLOYING_TASKS;
         }
+        else if (parsed_frame)
+        {
+            fprintf(stderr,
+                    "[Host Driver %d] Unexpected message while waiting for calibration: "
+                    "expected 0x%02X, received 0x%02X (length=%u).\n",
+                    node_id,
+                    MSG_CALIB_RESP,
+                    parsed_frame->type,
+                    parsed_frame->load_len);
+        }
         break;
 
     case DRIVER_STATE_DEPLOYING_TASKS:
-        printf("[Host Driver %d] Sending tasks to the node...\n", node_id);
-
         // Read unassigned tasks from shared memory
         task_config_t next_task;
         int task_result = shared_memory_read_next_task(shared_memory, node_id, &next_task);
@@ -124,6 +133,8 @@ static void handle_state_machine(int node_id,
 
         if (task_result > 0)
         {
+            printf("[Host Driver %d] Sending task to the node...\n", node_id);
+
             // Build task
             uint8_t load[PROTOCOL_MAX_LOAD_SIZE];
             msg_task_deploy_t deploy_msg = {
@@ -135,7 +146,7 @@ static void handle_state_machine(int node_id,
             int load_len = msg_task_deploy_pack(&deploy_msg, load, sizeof(load));
 
             // Send frame to ring buffer
-            if (driver_send_frame(tx_rb, MSG_TASK_DEPLOY, load, (size_t)load_len))
+            if (driver_send_frame_to_rb(tx_rb, MSG_TASK_DEPLOY, load, (size_t)load_len))
             {
                 if (shared_memory_mark_task_assigned(shared_memory,
                                                      node_id,
@@ -144,36 +155,74 @@ static void handle_state_machine(int node_id,
                     perror("[Driver Error] Could not mark task as assigned");
                     break;
                 }
-                *state = DRIVER_STATE_WAITING_ACK;
+                *state = DRIVER_STATE_WAITING_TASK_ACK;
             }
         }
         else
         {
+            printf("[Host Driver %d] All tasks have been sent successfully to the node.\n", node_id);
             *state = DRIVER_STATE_START;
         }
 
         break;
 
-    case DRIVER_STATE_WAITING_ACK:
+    case DRIVER_STATE_WAITING_TASK_ACK:
         if (parsed_frame && parsed_frame->type == 0x08) // MSG_ACK
         {
             msg_ack_t ack;
             if (msg_ack_unpack(parsed_frame->load, parsed_frame->load_len, &ack) == PROTOCOL_OK)
             {
-                if (ack.status == MSG_ACK_OK)
+                if (ack.acked_type != MSG_TASK_DEPLOY)
                 {
-                    if (ack.acked_type == 0x02) // ACK for MSG_TASK_DEPLOY
-                    {
-                        printf("[Host Driver %d] Task deployment confirmed with ACK (0x08).\n", node_id);
-                        *state = DRIVER_STATE_DEPLOYING_TASKS;
-                    }
-                    else if (ack.acked_type == 0x03) // ACK for MSG_START
-                    {
-                        printf("[Host Driver %d] Node successfully initialized. Waiting for tick reports (0x05)...\n", node_id);
-                        if (shared_memory_set_node_active(shared_memory, node_id, true) != 0)
-                            perror("[Driver Error] Could not update shared node state");
-                        *state = DRIVER_STATE_WAITING_TICK_REPORT;
-                    }
+                    fprintf(stderr,
+                            "[Host Driver %d] Ignoring ACK for unexpected message 0x%02X; "
+                            "waiting for task deployment ACK.\n",
+                            node_id,
+                            ack.acked_type);
+                }
+                else if (ack.status == MSG_ACK_OK)
+                {
+                    printf("[Host Driver %d] Task deployment confirmed with ACK (0x08).\n", node_id);
+                    *state = DRIVER_STATE_DEPLOYING_TASKS;
+                }
+                else
+                {
+                    fprintf(stderr,
+                            "[Host Driver %d] Task deployment rejected with status %u.\n",
+                            node_id,
+                            ack.status);
+                }
+            }
+        }
+        break;
+
+    case DRIVER_STATE_WAITING_START_ACK:
+        if (parsed_frame && parsed_frame->type == MSG_ACK)
+        {
+            msg_ack_t ack;
+            if (msg_ack_unpack(parsed_frame->load, parsed_frame->load_len, &ack) == PROTOCOL_OK)
+            {
+                if (ack.acked_type != MSG_START)
+                {
+                    fprintf(stderr,
+                            "[Host Driver %d] Ignoring ACK for unexpected message 0x%02X; "
+                            "waiting for start ACK.\n",
+                            node_id,
+                            ack.acked_type);
+                }
+                else if (ack.status == MSG_ACK_OK)
+                {
+                    printf("[Host Driver %d] Start message confirmed with ACK (0x08).\n", node_id);
+                    if (shared_memory_set_node_active(shared_memory, node_id, true) != 0)
+                        perror("[Driver Error] Could not update shared node state");
+                    *state = DRIVER_STATE_WAITING_TICK_REPORT;
+                }
+                else
+                {
+                    fprintf(stderr,
+                            "[Host Driver %d] Start message rejected with status %u.\n",
+                            node_id,
+                            ack.status);
                 }
             }
         }
@@ -181,6 +230,8 @@ static void handle_state_machine(int node_id,
 
     case DRIVER_STATE_START:
     {
+        printf("[Host Driver %d] Sending start message to the node...\n", node_id);
+
         // Build start message
         uint8_t load[PROTOCOL_MAX_LOAD_SIZE];
         msg_start_t start_msg = {
@@ -189,9 +240,9 @@ static void handle_state_machine(int node_id,
         int load_len = msg_start_pack(&start_msg, load, sizeof(load));
 
         // Send frame to ring buffer
-        if (driver_send_frame(tx_rb, 0x03, load, (size_t)load_len))
+        if (driver_send_frame_to_rb(tx_rb, 0x03, load, (size_t)load_len))
         {
-            *state = DRIVER_STATE_WAITING_ACK;
+            *state = DRIVER_STATE_WAITING_START_ACK;
         }
     }
     break;
@@ -199,7 +250,7 @@ static void handle_state_machine(int node_id,
     case DRIVER_STATE_WAITING_TICK_REPORT:
         if (parsed_frame)
         {
-            if (parsed_frame->type == 0x05) // MSG_TICK_REPORT (Periodic heartbeat)
+            if (parsed_frame->type == MSG_TICK_REPORT)
             {
                 msg_tick_report_t report;
                 if (msg_tick_report_unpack(parsed_frame->load,
@@ -208,7 +259,7 @@ static void handle_state_machine(int node_id,
                     shared_memory_record_tick_report(shared_memory, node_id, &report) != 0)
                     perror("[Driver Error] Could not save tick report");
             }
-            else if (parsed_frame->type == 0x04) // MSG_EVENT (Release, deadline miss, etc.)
+            else if (parsed_frame->type == MSG_EVENT)
             {
                 msg_event_t event;
                 if (msg_event_unpack(parsed_frame->load,
@@ -217,6 +268,7 @@ static void handle_state_machine(int node_id,
                 {
                     if (shared_memory_record_event(shared_memory, node_id, &event) != 0)
                         perror("[Driver Error] Could not save node event");
+
                     printf("[Host Driver %d] Event received: type=%u task=%u tick=%u aux=%u\n",
                            node_id,
                            event.event_type,
@@ -235,7 +287,7 @@ static void handle_state_machine(int node_id,
             msg_sporadic_t sporadic_msg = {.task_id = 7};
             int load_len = msg_sporadic_pack(&sporadic_msg, load, sizeof(load));
 
-            if (driver_send_frame(tx_rb, 0x06, load, (size_t)load_len))
+            if (driver_send_frame_to_rb(tx_rb, 0x06, load, (size_t)load_len))
             {
                 *state = DRIVER_STATE_WAITING_TICK_REPORT; // Return to monitoring
             }
@@ -244,8 +296,41 @@ static void handle_state_machine(int node_id,
 
     case DRIVER_STATE_STOP:
         printf("[Host Driver %d] Ordering node shutdown (0x07)...\n", node_id);
-        driver_send_frame(tx_rb, 0x07, NULL, 0);
+        driver_send_frame_to_rb(tx_rb, 0x07, NULL, 0);
         break;
+    }
+}
+
+/**
+ * @brief Dispatches state machine actions in a loop until the state changes or no further actions are required.
+ *
+ * @param node_id Identifier of the current node driver process.
+ * @param tx_rb Pointer to the transmission ring buffer where outgoing protocol frames are pushed.
+ * @param state Pointer to the current driver state variable, which is updated during protocol execution.
+ * @param shared_memory Pointer to the shared memory object for data exchange.
+ * @param config Pointer to the node driver configuration structure.
+ */
+static void dispatch_state_actions(int node_id,
+                                   ring_buffer_t *tx_rb,
+                                   driver_state_t *state,
+                                   shared_memory_t *shared_memory,
+                                   const node_driver_config_t *config)
+{
+    for (int action = 0; action < 2; action++)
+    {
+        if (*state != DRIVER_STATE_DEPLOYING_TASKS &&
+            *state != DRIVER_STATE_START)
+            return;
+
+        driver_state_t previous_state = *state;
+        handle_state_machine(node_id,
+                             tx_rb,
+                             state,
+                             NULL,
+                             shared_memory,
+                             config);
+        if (*state == previous_state)
+            return;
     }
 }
 
@@ -320,7 +405,7 @@ static int setup_tty_device(const char *tty_device)
  * @param tx_rb Pointer to the transmission ring buffer.
  * @param parser Pointer to the protocol parser instance.
  * @param current_state Pointer to the current driver state variable.
- * @param shm_base Pointer to the base address of the mapped shared memory region.
+ * @param shared_memory Pointer to the mapped shared memory region.
  * @return true if the RX operation completed normally (or handled non-blocking states),
  *         false if a fatal read error occurred or the connection was closed by the node.
  */
@@ -357,14 +442,17 @@ static bool process_rx_channel(int tty_fd,
 
             if (result == PROTOCOL_FRAME_READY)
             {
-                printf("[Node Driver %d] Valid frame decoded successfully! (Type: 0x%02X)\n",
-                       node_id, parser->frame.type);
                 handle_state_machine(node_id,
                                      tx_rb,
                                      current_state,
                                      &parsed_frame,
                                      shared_memory,
                                      config);
+                dispatch_state_actions(node_id,
+                                       tx_rb,
+                                       current_state,
+                                       shared_memory,
+                                       config);
             }
             else if (result == PROTOCOL_ERR_LEN || result == PROTOCOL_ERR_CRC)
             {
