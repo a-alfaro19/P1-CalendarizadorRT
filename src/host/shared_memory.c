@@ -7,7 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define SHARED_MEMORY_MAGIC 0x53484D32u
+#define SHARED_MEMORY_MAGIC 0x53484D33u
 
 static int valid_memory(const shared_memory_t *memory)
 {
@@ -555,4 +555,20 @@ int shared_memory_receive(shared_memory_t *memory, shared_queue_channel_t channe
     ipc_queue_t *queue = select_queue(memory, channel, node_id);
     if (!queue) return -1;
     return ipc_queue_receive(queue, message, timeout_ms);
+}
+
+int shared_memory_write_startup(shared_memory_t *memory, const startup_status_t *status)
+{
+    if (!valid_memory(memory) || !status) { errno = EINVAL; return -1; }
+    if (lock_memory(memory) < 0) return -1;
+    memory->data->startup = *status;
+    return unlock_memory(memory);
+}
+
+int shared_memory_read_startup(shared_memory_t *memory, startup_status_t *status)
+{
+    if (!valid_memory(memory) || !status) { errno = EINVAL; return -1; }
+    if (lock_memory(memory) < 0) return -1;
+    *status = memory->data->startup;
+    return unlock_memory(memory);
 }

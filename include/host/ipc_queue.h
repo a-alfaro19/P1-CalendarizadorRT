@@ -3,6 +3,7 @@
 #include <semaphore.h>
 #include <stdint.h>
 #include "protocol/message.h"
+#include "host/startup.h"
 
 #define IPC_QUEUE_CAPACITY 64
 #define IPC_REASON_LENGTH 128
@@ -21,6 +22,7 @@ typedef enum
     IPC_EVENT,
     IPC_TICK,
     IPC_ASSIGNMENT,
+    IPC_STARTUP,
     IPC_SHUTDOWN
 } ipc_message_type_t;
 
@@ -29,8 +31,11 @@ typedef struct
     ipc_message_type_t type;
     int node_id;
     uint32_t request_id;
+    uint64_t not_before_ns;
+    startup_timing_t timing;
     union
     {
+        startup_status_t startup;
         msg_calib_req_t calibrate;
         msg_task_deploy_t deploy;
         msg_start_t start;

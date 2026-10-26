@@ -157,7 +157,7 @@ static void test_driver_ipc_protocol_and_corruption(void)
     assert(shared_memory_destroy(&memory) == 0);
 }
 
-static void test_planner_with_two_serial_drivers(void)
+static void run_two_serial_drivers(int failure_mode)
 {
     setup();
     driver_t drivers[2] = {launch_driver(1), launch_driver(2)};
@@ -171,7 +171,11 @@ static void test_planner_with_two_serial_drivers(void)
                         {2, TASK_PERIODIC, 100, 10, 10, 1},
                         {3, TASK_PERIODIC, 100, 10, 10, 1}};
         PlannerState planner;
-        assert(scheduler_bootstrap(&memory, &config, tasks, 3, 2, 2000, &planner) == 0);
+        int rc = scheduler_bootstrap(&memory, &config, tasks, 3, 2, 500, &planner);
+        if (failure_mode) {
+            assert(rc == -1);
+            assert(errno == (failure_mode == 1 ? EPROTO : ETIMEDOUT));
+        } else assert(rc == 0);
         _exit(0);
     }
     for (int i = 0; i < 2; i++) {
@@ -192,16 +196,94 @@ static void test_planner_with_two_serial_drivers(void)
     for (int i = 0; i < 2; i++) {
         protocol_frame_t frame = read_frame(drivers[i].master);
         assert(frame.type == MSG_START);
-        ack_frame(drivers[i].master, MSG_START, MSG_ACK_OK);
+        if (!i || !failure_mode) ack_frame(drivers[i].master, MSG_START, MSG_ACK_OK);
+        else if (failure_mode == 1) ack_frame(drivers[i].master, MSG_START, MSG_ACK_INVALID);
+    }
+    if (failure_mode) {
+        for (int i = 0; i < 2; i++) {
+            protocol_frame_t frame = read_frame(drivers[i].master);
+            assert(frame.type == MSG_STOP);
+            /* Un START tardío no debe confundirse con la respuesta de STOP. */
+            ack_frame(drivers[i].master, MSG_START, MSG_ACK_OK);
+            ack_frame(drivers[i].master, MSG_STOP, MSG_ACK_OK);
+        }
     }
     join_success(scheduler);
+    startup_status_t startup;
+    assert(shared_memory_read_startup(&memory, &startup) == 0);
+    if (failure_mode) {
+        assert(startup.phase == STARTUP_FAILED && startup.failed_phase == STARTUP_STARTING);
+        assert(!startup.timing_valid);
+        for (int i = 0; i < 2; i++) assert(startup.nodes[i].stop_confirmed);
+    } else {
+        assert(startup.phase == STARTUP_RUNNING && startup.timing_valid);
+        for (int i = 0; i < 2; i++) {
+            startup_timing_t timing = startup.nodes[i].start;
+            assert(timing.tx_begin_ns >= startup.target_start_ns);
+            assert(timing.tx_end_ns >= timing.tx_begin_ns && timing.ack_ns >= timing.tx_end_ns);
+        }
+        assert(startup.zero_delta_min_ns <= startup.zero_delta_max_ns);
+    }
     for (int i = 0; i < 2; i++) stop_driver(drivers[i], i + 1);
     assert(shared_memory_destroy(&memory) == 0);
 }
+static void test_planner_with_two_serial_drivers(void) { run_two_serial_drivers(0); }
+static void test_partial_start_rejected_stops_both_nodes(void) { run_two_serial_drivers(1); }
+static void test_missing_start_ack_stops_both_nodes(void) { run_two_serial_drivers(2); }
+
+static void test_stop_interrupts_calibration_wait(void)
+{
+    setup();
+    driver_t driver = launch_driver(1);
+    ipc_message_t request = {.type = IPC_CALIBRATE, .node_id = 1, .request_id = 1};
+    request.payload.calibrate.tick_ms = 10;
+    send_command(request);
+    protocol_frame_t frame = read_frame(driver.master);
+    assert(frame.type == MSG_CALIB_REQ);
+    request = (ipc_message_t){.type = IPC_STOP, .node_id = 1, .request_id = 2};
+    send_command(request);
+    frame = read_frame(driver.master);
+    assert(frame.type == MSG_STOP);
+    calibration(driver.master, 30, 0);
+    ack_frame(driver.master, MSG_STOP, MSG_ACK_OK);
+    ipc_message_t reply = response();
+    assert(reply.type == IPC_ACK && reply.request_id == 2 && reply.payload.ack.acked_type == MSG_STOP);
+    stop_driver(driver, 1);
+    assert(shared_memory_destroy(&memory) == 0);
+}
+
+static void test_unavailable_port_allows_abort_coordination(void)
+{
+    setup();
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (!pid) {
+        node_driver_run(1, "/dev/null", shared_memory_tx_ring_buffer(&memory, 1), name, &settings);
+        _exit(0);
+    }
+    ipc_message_t reply = response();
+    assert(reply.type == IPC_NODE_DOWN && reply.node_id == 1);
+    assert(kill(pid, 0) == 0);
+    ipc_message_t stop = {.type = IPC_STOP, .node_id = 1, .request_id = 10};
+    send_command(stop);
+    reply = response();
+    assert(reply.type == IPC_ERROR && reply.request_id == 10);
+    stop.type = IPC_SHUTDOWN;
+    send_command(stop);
+    int status;
+    assert(waitpid(pid, &status, 0) == pid);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == EXIT_FAILURE);
+    assert(shared_memory_destroy(&memory) == 0);
+}
+
 int main(void)
 {
     alarm(20);
     RUN_TEST(test_driver_ipc_protocol_and_corruption);
     RUN_TEST(test_planner_with_two_serial_drivers);
+    RUN_TEST(test_partial_start_rejected_stops_both_nodes);
+    RUN_TEST(test_missing_start_ack_stops_both_nodes);
+    RUN_TEST(test_stop_interrupts_calibration_wait);
+    RUN_TEST(test_unavailable_port_allows_abort_coordination);
     return 0;
 }

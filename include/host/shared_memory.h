@@ -13,7 +13,7 @@
 #define SHARED_MAX_TASKS_PER_NODE 10
 
 /** Maximum number of nodes represented in shared memory. */
-#define SHARED_NUM_NODES 2
+#define SHARED_NUM_NODES HOST_NODE_COUNT
 
 /** Maximum length of a shared memory object name, including its terminator. */
 #define SHARED_MEMORY_NAME_MAX 128
@@ -73,6 +73,7 @@ typedef struct
     ipc_queue_t commands[SHARED_NUM_NODES];          /* Planner -> one driver per queue. */
     ipc_queue_t responses;                           /* Drivers -> planner; multiple producers. */
     ipc_queue_t events;                              /* Drivers and planner -> report; multiple producers. */
+    startup_status_t startup;
     uint32_t magic;                                  /**< Shared memory format marker. */
     shared_system_config_t config;                   /**< Task configuration. */
     shared_node_status_t nodes[SHARED_NUM_NODES];    /**< Per-node runtime status. */
@@ -233,3 +234,7 @@ int shared_memory_send(shared_memory_t *memory, shared_queue_channel_t channel,
                        int node_id, const ipc_message_t *message, int timeout_ms);
 int shared_memory_receive(shared_memory_t *memory, shared_queue_channel_t channel,
                           int node_id, ipc_message_t *message, int timeout_ms);
+
+/* El planificador publica el estado; el supervisor y las pruebas lo consultan. */
+int shared_memory_write_startup(shared_memory_t *memory, const startup_status_t *status);
+int shared_memory_read_startup(shared_memory_t *memory, startup_status_t *status);

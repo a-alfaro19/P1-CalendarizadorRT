@@ -29,8 +29,15 @@ recuperación durante la ejecución.
 El arranque espera las calibraciones, publica las asignaciones en memoria
 compartida, envía tareas y verifica cada ACK. Solo después de confirmar todas
 las tareas envía START a ambos nodos. Cada intercambio tiene un plazo de 30 s;
-una calibración inválida, rechazo o timeout detiene el arranque con un error.
+una calibración inválida, rechazo o timeout cancela el arranque y solicita STOP
+a todos los nodos, con espera limitada y confirmación por separado. Si el STOP
+no se confirma, el host no puede asegurar que esa placa se haya detenido.
 El campo `assigned` indica confirmación por el nodo, no solo admisión matemática.
+
+START usa un objetivo común de tiempo del host. El log muestra el desfase entre
+los envíos y un intervalo conservador para la diferencia entre los ticks cero.
+Son observaciones del host; la medición física en las placas sigue siendo una
+validación necesaria.
 
 El proceso de reporte consume la cola y muestra admisiones y eventos en consola.
 El Gantt, la persistencia del reporte, las tareas manuales, la recuperación de

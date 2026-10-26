@@ -32,7 +32,13 @@ static void respond(ipc_message_t message)
 }
 static void ack(ipc_message_t request, int status)
 {
-    request.payload.ack = (msg_ack_t){request.type == IPC_DEPLOY ? MSG_TASK_DEPLOY : MSG_START, status};
+    int wire_type = request.type == IPC_DEPLOY ? MSG_TASK_DEPLOY :
+                    request.type == IPC_STOP ? MSG_STOP : MSG_START;
+    if (request.type == IPC_START) {
+        uint64_t begin = request.not_before_ns + (uint64_t)request.node_id * 1000000u;
+        request.timing = (startup_timing_t){begin, begin + 500000u, begin + 2000000u};
+    }
+    request.payload.ack = (msg_ack_t){wire_type, status};
     request.type = IPC_ACK;
     respond(request);
 }
@@ -86,6 +92,7 @@ static void test_measured_speeds_and_ack_barrier(void)
     first = command(1);
     second = command(2);
     assert(first.type == IPC_START && second.type == IPC_START);
+    assert(first.not_before_ns != 0 && first.not_before_ns == second.not_before_ns);
     shared_system_config_t stored;
     assert(shared_memory_read_config(&memory, &stored) == 0);
     for (int n = 0; n < 2; n++)
@@ -93,10 +100,20 @@ static void test_measured_speeds_and_ack_barrier(void)
     ack(second, MSG_ACK_OK);
     ack(first, MSG_ACK_OK);
     joined(pid);
-    for (int i = 0; i < 3; i++) {
-        assert(shared_memory_receive(&memory, SHARED_QUEUE_EVENT, 0, &extra, 0) == 0);
-        assert(extra.type == IPC_ASSIGNMENT && extra.payload.assignment.accepted);
+    startup_status_t startup;
+    assert(shared_memory_read_startup(&memory, &startup) == 0);
+    assert(startup.phase == STARTUP_RUNNING && startup.timing_valid);
+    assert(startup.tx_skew_ns == 1000000u);
+    assert(startup.zero_delta_min_ns == -1000000 && startup.zero_delta_max_ns == 3000000);
+    int assignments = 0, running = 0;
+    while (shared_memory_receive(&memory, SHARED_QUEUE_EVENT, 0, &extra, 0) == 0) {
+        if (extra.type == IPC_ASSIGNMENT) {
+            assert(extra.payload.assignment.accepted);
+            assignments++;
+        }
+        if (extra.type == IPC_STARTUP && extra.payload.startup.phase == STARTUP_RUNNING) running++;
     }
+    assert(assignments == 3 && running == 1);
     assert(shared_memory_destroy(&memory) == 0);
 }
 
@@ -108,7 +125,7 @@ static void failure_case(int mode)
     if (!pid) {
         PlannerState planner;
         assert(scheduler_bootstrap(&memory, &config, tasks, 1, 1, 200, &planner) == -1);
-        assert(errno == (mode == 0 ? ETIMEDOUT : mode == 1 ? ERANGE : EPROTO));
+        assert(errno == (mode == 0 || mode == 4 || mode == 5 ? ETIMEDOUT : mode == 1 ? ERANGE : EPROTO));
         _exit(0);
     }
     ipc_message_t request = command(1);
@@ -116,13 +133,26 @@ static void failure_case(int mode)
         request.type = IPC_CALIBRATED;
         request.payload.calibrated.ut_per_tick = mode == 1 ? 0 : 20;
         respond(request);
-        if (mode == 2) {
+        if (mode >= 2) {
             request = command(1);
             assert(request.type == IPC_DEPLOY);
-            ack(request, MSG_ACK_NO_SPACE);
+            ack(request, mode == 2 ? MSG_ACK_NO_SPACE : MSG_ACK_OK);
+            if (mode >= 3) {
+                request = command(1);
+                assert(request.type == IPC_START);
+                if (mode == 3) ack(request, MSG_ACK_INVALID);
+            }
         }
     }
+    request = command(1);
+    assert(request.type == IPC_STOP);
+    if (mode != 5) ack(request, MSG_ACK_OK);
     joined(pid);
+    startup_status_t startup;
+    assert(shared_memory_read_startup(&memory, &startup) == 0);
+    assert(startup.phase == STARTUP_FAILED);
+    assert(startup.nodes[0].stop_confirmed == (mode != 5));
+    assert(!startup.timing_valid);
     if (mode == 2) {
         shared_system_config_t stored;
         assert(shared_memory_read_config(&memory, &stored) == 0);
@@ -135,6 +165,35 @@ static void failure_case(int mode)
 static void test_missing_calibration(void) { failure_case(0); }
 static void test_invalid_calibration(void) { failure_case(1); }
 static void test_rejected_deployment(void) { failure_case(2); }
+static void test_rejected_start(void) { failure_case(3); }
+static void test_missing_start_ack(void) { failure_case(4); }
+static void test_missing_stop_ack_is_bounded(void) { failure_case(5); }
+
+static void test_single_node_without_tasks(void)
+{
+    create_memory();
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (!pid) {
+        PlannerState planner;
+        assert(scheduler_bootstrap(&memory, &config, tasks, 0, 1, 1000, &planner) == 0);
+        _exit(0);
+    }
+    ipc_message_t request = command(1);
+    assert(request.type == IPC_CALIBRATE);
+    request.type = IPC_CALIBRATED;
+    request.payload.calibrated.ut_per_tick = 10;
+    respond(request);
+    request = command(1);
+    assert(request.type == IPC_START);
+    ack(request, MSG_ACK_OK);
+    joined(pid);
+    startup_status_t startup;
+    assert(shared_memory_read_startup(&memory, &startup) == 0);
+    assert(startup.phase == STARTUP_RUNNING && startup.nodes[0].planned_tasks == 0);
+    assert(startup.nodes[0].start_confirmed && startup.timing_valid);
+    assert(shared_memory_destroy(&memory) == 0);
+}
 
 static void test_hardware_admission_limits(void)
 {
@@ -165,6 +224,10 @@ int main(void)
     RUN_TEST(test_missing_calibration);
     RUN_TEST(test_invalid_calibration);
     RUN_TEST(test_rejected_deployment);
+    RUN_TEST(test_rejected_start);
+    RUN_TEST(test_missing_start_ack);
+    RUN_TEST(test_missing_stop_ack_is_bounded);
+    RUN_TEST(test_single_node_without_tasks);
     RUN_TEST(test_hardware_admission_limits);
     return 0;
 }
