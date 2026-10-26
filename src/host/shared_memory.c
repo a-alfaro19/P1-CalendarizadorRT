@@ -7,7 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define SHARED_MEMORY_MAGIC 0x53484D31u
+#define SHARED_MEMORY_MAGIC 0x53484D32u
 
 static int valid_memory(const shared_memory_t *memory)
 {
@@ -94,6 +94,23 @@ int shared_memory_create(shared_memory_t *memory, const char *name)
         shm_unlink(name);
         errno = saved_errno;
         return -1;
+    }
+
+    ipc_queue_t *queues[SHARED_NUM_NODES + 2];
+    for (int i = 0; i < SHARED_NUM_NODES; i++) queues[i] = &data->commands[i];
+    queues[SHARED_NUM_NODES] = &data->responses;
+    queues[SHARED_NUM_NODES + 1] = &data->events;
+    for (int i = 0; i < SHARED_NUM_NODES + 2; i++) {
+        if (ipc_queue_init(queues[i]) < 0) {
+            int saved_errno = errno;
+            while (i > 0) ipc_queue_destroy(queues[--i]);
+            sem_destroy(&data->mutex);
+            munmap(data, memory->size);
+            close(fd);
+            shm_unlink(name);
+            errno = saved_errno;
+            return -1;
+        }
     }
 
     for (int i = 0; i < SHARED_NUM_NODES; i++)
@@ -200,6 +217,16 @@ int shared_memory_destroy(shared_memory_t *memory)
 
     int result = 0;
     int saved_errno = 0;
+    ipc_queue_t *queues[SHARED_NUM_NODES + 2];
+    for (int i = 0; i < SHARED_NUM_NODES; i++) queues[i] = &memory->data->commands[i];
+    queues[SHARED_NUM_NODES] = &memory->data->responses;
+    queues[SHARED_NUM_NODES + 1] = &memory->data->events;
+    for (int i = 0; i < SHARED_NUM_NODES + 2; i++) {
+        if (ipc_queue_destroy(queues[i]) < 0 && result == 0) {
+            result = -1;
+            saved_errno = errno;
+        }
+    }
     if (sem_destroy(&memory->data->mutex) < 0)
     {
         result = -1;
@@ -494,4 +521,38 @@ ring_buffer_t *shared_memory_tx_ring_buffer(shared_memory_t *memory,
         return NULL;
     }
     return &memory->data->tx_ring_buffers[node_id - 1];
+}
+
+static ipc_queue_t *select_queue(shared_memory_t *memory,
+                                 shared_queue_channel_t channel, int node_id)
+{
+    if (!valid_memory(memory)) return NULL;
+    if (channel == SHARED_QUEUE_COMMAND && node_id >= 1 && node_id <= SHARED_NUM_NODES)
+        return &memory->data->commands[node_id - 1];
+    if (channel == SHARED_QUEUE_RESPONSE && node_id == 0) return &memory->data->responses;
+    if (channel == SHARED_QUEUE_EVENT && node_id == 0) return &memory->data->events;
+    errno = EINVAL;
+    return NULL;
+}
+
+int shared_memory_send(shared_memory_t *memory, shared_queue_channel_t channel,
+                       int node_id, const ipc_message_t *message, int timeout_ms)
+{
+    ipc_queue_t *queue = select_queue(memory, channel, node_id);
+    if (!queue) return -1;
+    if (!message || message->node_id < 0 || message->node_id > SHARED_NUM_NODES ||
+        message->type < IPC_CALIBRATE || message->type > IPC_SHUTDOWN ||
+        (channel == SHARED_QUEUE_COMMAND && message->node_id != node_id)) {
+        errno = EINVAL;
+        return -1;
+    }
+    return ipc_queue_send(queue, message, timeout_ms);
+}
+
+int shared_memory_receive(shared_memory_t *memory, shared_queue_channel_t channel,
+                          int node_id, ipc_message_t *message, int timeout_ms)
+{
+    ipc_queue_t *queue = select_queue(memory, channel, node_id);
+    if (!queue) return -1;
+    return ipc_queue_receive(queue, message, timeout_ms);
 }

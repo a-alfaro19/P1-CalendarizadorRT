@@ -6,6 +6,7 @@
 #include <semaphore.h>
 
 #include "host/ring_buffer.h"
+#include "host/ipc_queue.h"
 #include "protocol/message.h"
 
 /** Maximum number of task definitions stored for each node. */
@@ -69,6 +70,9 @@ typedef struct
  */
 typedef struct
 {
+    ipc_queue_t commands[SHARED_NUM_NODES];          /* Planner -> one driver per queue. */
+    ipc_queue_t responses;                           /* Drivers -> planner; multiple producers. */
+    ipc_queue_t events;                              /* Drivers and planner -> report; multiple producers. */
     uint32_t magic;                                  /**< Shared memory format marker. */
     shared_system_config_t config;                   /**< Task configuration. */
     shared_node_status_t nodes[SHARED_NUM_NODES];    /**< Per-node runtime status. */
@@ -218,3 +222,14 @@ int shared_memory_read_node_status(shared_memory_t *memory,
  */
 ring_buffer_t *shared_memory_tx_ring_buffer(shared_memory_t *memory,
                                             int node_id);
+
+typedef enum
+{
+    SHARED_QUEUE_COMMAND,
+    SHARED_QUEUE_RESPONSE,
+    SHARED_QUEUE_EVENT
+} shared_queue_channel_t;
+int shared_memory_send(shared_memory_t *memory, shared_queue_channel_t channel,
+                       int node_id, const ipc_message_t *message, int timeout_ms);
+int shared_memory_receive(shared_memory_t *memory, shared_queue_channel_t channel,
+                          int node_id, ipc_message_t *message, int timeout_ms);

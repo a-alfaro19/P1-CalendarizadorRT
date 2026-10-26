@@ -23,7 +23,7 @@ SCHEDULER_SRCS := $(shell find src/host/scheduler -name "*.c")
 SCHEDULER_OBJS := $(patsubst src/host/scheduler/%.c,$(BUILD_DIR)/obj/host/scheduler/%.o,$(SCHEDULER_SRCS))
 
 # Host Commons objects
-HOST_COMM_SRCS := src/host/ring_buffer.c src/host/shared_memory.c src/host/node_driver.c src/host/process_manager.c
+HOST_COMM_SRCS := src/host/ipc_queue.c src/host/ring_buffer.c src/host/shared_memory.c src/host/node_driver.c src/host/process_manager.c
 HOST_COMM_OBJS := $(patsubst src/host/%.c,$(BUILD_DIR)/obj/host/comm/%.o,$(HOST_COMM_SRCS))
 
 # Host binary
@@ -76,7 +76,7 @@ host: $(LIB_PROTOCOL) $(LIB_HOST_COMM) $(LIB_SCHEDULER) $(HOST_BIN)
 
 $(HOST_BIN): $(HOST_SRC) $(LIB_PROTOCOL) $(LIB_HOST_COMM) $(LIB_SCHEDULER)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lhost_comm -lscheduler -lprotocol -lm -o $@
+	$(CC) $(CFLAGS) $< -L$(LIB_DIR) -lhost_comm -lscheduler -lprotocol -lm -pthread -o $@
 
 # ---------- Tests Rules ----------
 
@@ -90,10 +90,15 @@ $(BUILD_DIR)/$(TEST_DIR)/node_driver_core_tests: $(TEST_DIR)/node_driver_core_te
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(SANFLAGS) -Iinclude/node/scheduler -Itests $< $(NODE_DRIVER_CORE_SRCS) -o $@
 
+# Instrument the IPC implementation itself, not only the test executable.
+$(BUILD_DIR)/$(TEST_DIR)/ipc_queue_tests: $(TEST_DIR)/ipc_queue_tests.c src/host/ipc_queue.c src/host/shared_memory.c src/host/ring_buffer.c $(HEADERS) $(TEST_DIR)/test_harness.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< src/host/ipc_queue.c src/host/shared_memory.c src/host/ring_buffer.c -pthread -o $@
+
 # Generic compilation for any test
 $(BUILD_DIR)/$(TEST_DIR)/%: $(TEST_DIR)/%.c $(LIB_PROTOCOL) $(LIB_HOST_COMM) $(LIB_SCHEDULER) $(HEADERS)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< -L$(LIB_DIR) -lhost_comm -lscheduler -lprotocol -lm -o $@
+	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< -L$(LIB_DIR) -lhost_comm -lscheduler -lprotocol -lm -pthread -o $@
 	
 $(BUILD_DIR)/$(TEST_DIR)/%/:
 	@mkdir -p $@

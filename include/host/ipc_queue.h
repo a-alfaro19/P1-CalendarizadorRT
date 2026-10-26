@@ -1,0 +1,71 @@
+#pragma once
+
+#include <semaphore.h>
+#include <stdint.h>
+#include "protocol/message.h"
+
+#define IPC_QUEUE_CAPACITY 64
+#define IPC_REASON_LENGTH 128
+
+typedef enum
+{
+    IPC_CALIBRATE,
+    IPC_DEPLOY,
+    IPC_START,
+    IPC_SPORADIC,
+    IPC_STOP,
+    IPC_CALIBRATED,
+    IPC_ACK,
+    IPC_NODE_DOWN,
+    IPC_ERROR,
+    IPC_EVENT,
+    IPC_TICK,
+    IPC_ASSIGNMENT,
+    IPC_SHUTDOWN
+} ipc_message_type_t;
+
+typedef struct
+{
+    ipc_message_type_t type;
+    int node_id;
+    uint32_t request_id;
+    union
+    {
+        msg_calib_req_t calibrate;
+        msg_task_deploy_t deploy;
+        msg_start_t start;
+        msg_sporadic_t sporadic;
+        msg_calib_resp_t calibrated;
+        msg_ack_t ack;
+        msg_event_t event;
+        msg_tick_report_t tick;
+        struct
+        {
+            int task_id;
+            int accepted;
+            int cost_ticks;
+            char reason[IPC_REASON_LENGTH];
+        } assignment;
+        struct
+        {
+            int code;
+            char reason[IPC_REASON_LENGTH];
+        } error;
+    } payload;
+} ipc_message_t;
+
+typedef struct
+{
+    sem_t mutex;
+    sem_t items;
+    sem_t spaces;
+    unsigned head;
+    unsigned tail;
+    ipc_message_t messages[IPC_QUEUE_CAPACITY];
+} ipc_queue_t;
+
+int ipc_queue_init(ipc_queue_t *queue);
+int ipc_queue_destroy(ipc_queue_t *queue);
+
+int ipc_queue_send(ipc_queue_t *queue, const ipc_message_t *message, int timeout_ms);
+int ipc_queue_receive(ipc_queue_t *queue, ipc_message_t *message, int timeout_ms);
