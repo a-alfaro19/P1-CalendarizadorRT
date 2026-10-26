@@ -16,7 +16,7 @@
  */
 
 #include "protocol_defs.h"
+#include "crc16.h"
 #include "frame.h"
 #include "message.h"
-#include "parser.h"
 #include "parser.h"

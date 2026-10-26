@@ -66,9 +66,9 @@ enum
 /** Acknowledgement status (msg_ack_t.status). */
 enum
 {
-    ACK_OK = 0,      /**< Message accepted. */
-    ACK_INVALID = 1, /**< Invalid data. */
-    ACK_NO_SPACE = 2 /**< The node has no room for another task. */
+    MSG_ACK_OK = 0,        /**< Message accepted. */
+    MSG_ACK_INVALID = 1,   /**< Invalid data. */
+    MSG_ACK_NO_SPACE = 2   /**< The node has no room for another task. */
 };
 
 #define TASK_NONE 0xFF /* task_id meaning "no task" (idle node) */

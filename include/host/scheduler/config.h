@@ -35,7 +35,7 @@ typedef struct
     int max_missed_reports;
 
     char task_file[MAX_PATH_LENGTH];
-} Config;
+} HostConfig;
 
 /*
  * Carga la config desde un archivo
@@ -44,4 +44,4 @@ typedef struct
  *   0  : configuración cargada correctamente
  *   -1 : error de lectura o config invalida
  */
-int load_config(const char *filename, Config *config);
+int load_config(const char *filename, HostConfig *config);

@@ -1,10 +1,90 @@
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "host/scheduler/admission.h"
 #include "host/scheduler/planner.h"
+#include "host/scheduler/task_parser.h"
 
 #define DOUBLE_EPSILON 1e-12
+
+static int parse_node_speed(const char *text, int *speed)
+{
+    char *end = NULL;
+    errno = 0;
+    long value = strtol(text, &end, 10);
+
+    if (errno != 0 || end == text || *end != '\0' || value <= 0 || value > INT_MAX)
+    {
+        fprintf(stderr, "[Planner] Velocidad de nodo inválida: %s\n", text);
+        return -1;
+    }
+
+    *speed = (int)value;
+    return 0;
+}
+
+int planner_initialize(PlannerState *state,
+                       HostConfig *config,
+                       const char *config_path,
+                       const char *node_speed_args[],
+                       int node_speed_count,
+                       TaskAssignment assignments[],
+                       int *task_count,
+                       int *accepted_count)
+{
+    if (state == NULL || config == NULL || config_path == NULL ||
+        node_speed_args == NULL || assignments == NULL ||
+        task_count == NULL || accepted_count == NULL)
+        return -1;
+
+    if (load_config(config_path, config) != 0)
+        return -1;
+
+    int node_count = config->node2_port[0] == '\0' ? 1 : 2;
+    if (node_speed_count != node_count)
+    {
+        fprintf(stderr,
+                "[Planner] La configuración requiere %d velocidad(es) de nodo, se recibieron %d\n",
+                node_count,
+                node_speed_count);
+        return -1;
+    }
+
+    NodeInfo nodes[2] = {0};
+    for (int i = 0; i < node_count; i++)
+    {
+        if (parse_node_speed(node_speed_args[i], &nodes[i].speed_ut_per_tick) != 0)
+            return -1;
+        nodes[i].id = i + 1;
+        nodes[i].active = 1;
+    }
+
+    if (planner_init(state, nodes, node_count, config) != 0)
+    {
+        fprintf(stderr, "[Planner] No se pudo inicializar el planificador\n");
+        return -1;
+    }
+
+    Task tasks[MAX_TASKS];
+    *task_count = load_tasks(config->task_file, tasks, MAX_TASKS);
+    if (*task_count < 0)
+        return -1;
+
+    *accepted_count = planner_load_initial_tasks(state,
+                                                 tasks,
+                                                 *task_count,
+                                                 assignments);
+    if (*accepted_count < 0)
+    {
+        fprintf(stderr, "[Planner] No se pudieron planificar las tareas iniciales\n");
+        return -1;
+    }
+
+    return 0;
+}
 
 int planner_find_task(const PlannerState *state, int task_id)
 {
@@ -222,7 +302,7 @@ static int assign_task(PlannerState *state,
 int planner_init(PlannerState *state,
                  const NodeInfo nodes[],
                  int node_count,
-                 const Config *config)
+                 const HostConfig *config)
 {
     if (state == NULL || nodes == NULL || config == NULL ||
         node_count <= 0 || node_count > MAX_NODES)

@@ -1,3 +1,5 @@
+#include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -26,8 +28,26 @@ static void copy_string(char *dest, size_t dest_size, const char *src)
     dest[dest_size - 1] = '\0';
 }
 
+static int parse_tick_value(const char *text, const char *key, int *value)
+{
+    char *end = NULL;
+    errno = 0;
+    long parsed = strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' ||
+        parsed <= 0 || parsed > UINT16_MAX)
+    {
+        fprintf(stderr, "%s debe estar entre 1 y %u\n",
+                key,
+                (unsigned)UINT16_MAX);
+        return -1;
+    }
+
+    *value = (int)parsed;
+    return 0;
+}
+
 /* Valores iniciales */
-static void set_default_config(Config *config)
+static void set_default_config(HostConfig *config)
 {
     config->algorithm = SCHED_EDF;
     config->heuristic = HEURISTIC_FIRST_FIT;
@@ -47,7 +67,7 @@ static void set_default_config(Config *config)
  * Procesa una linea key=value del archivo de config
  * Retorna 0 si la clave es valida y -1 si no se reconoce
  */
-static int parse_config_entry(Config *config,
+static int parse_config_entry(HostConfig *config,
                               const char *key,
                               const char *value)
 {
@@ -87,7 +107,7 @@ static int parse_config_entry(Config *config,
 
     else if (strcmp(key, "tick_ms") == 0)
     {
-        config->tick_ms = atoi(value);
+        return parse_tick_value(value, key, &config->tick_ms);
     }
 
     else if (strcmp(key, "node1_port") == 0)
@@ -99,14 +119,17 @@ static int parse_config_entry(Config *config,
 
     else if (strcmp(key, "node2_port") == 0)
     {
-        copy_string(config->node2_port,
-                    sizeof(config->node2_port),
-                    value);
+        if (strcmp(value, "none") == 0)
+            config->node2_port[0] = '\0';
+        else
+            copy_string(config->node2_port,
+                        sizeof(config->node2_port),
+                        value);
     }
 
     else if (strcmp(key, "tick_report_period") == 0)
     {
-        config->tick_report_period = atoi(value);
+        return parse_tick_value(value, key, &config->tick_report_period);
     }
 
     else if (strcmp(key, "max_missed_reports") == 0)
@@ -131,30 +154,17 @@ static int parse_config_entry(Config *config,
 }
 
 /* Comprueba que los valores obligatorios tengan sentido */
-static int validate_config(const Config *config)
+static int validate_config(const HostConfig *config)
 {
-    if (config->tick_ms <= 0)
-    {
-        fprintf(stderr, "tick_ms debe ser mayor que 0\n");
-        return -1;
-    }
-
-    if (config->tick_report_period <= 0)
-    {
-        fprintf(stderr, "tick_report_period debe ser mayor que 0\n");
-        return -1;
-    }
-
     if (config->max_missed_reports <= 0)
     {
         fprintf(stderr, "max_missed_reports debe ser mayor que 0\n");
         return -1;
     }
 
-    if (config->node1_port[0] == '\0' ||
-        config->node2_port[0] == '\0')
+    if (config->node1_port[0] == '\0')
     {
-        fprintf(stderr, "Falta indicar uno de los puertos seriales\n");
+        fprintf(stderr, "Falta indicar node1_port\n");
         return -1;
     }
 
@@ -167,7 +177,7 @@ static int validate_config(const Config *config)
     return 0;
 }
 
-int load_config(const char *filename, Config *config)
+int load_config(const char *filename, HostConfig *config)
 {
     if (config == NULL)
     {
@@ -207,7 +217,11 @@ int load_config(const char *filename, Config *config)
             continue;
         }
 
-        parse_config_entry(config, key, value);
+        if (parse_config_entry(config, key, value) != 0)
+        {
+            fclose(file);
+            return -1;
+        }
     }
 
     fclose(file);

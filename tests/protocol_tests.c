@@ -237,17 +237,17 @@ static void test_sporadic_roundtrip(void)
 
 /**
  * Case:     acknowledgement: two uint8 (MSG_TASK_DEPLOY confirmed, no space).
- * Expected: load = MSG_TASK_DEPLOY | ACK_NO_SPACE (2 bytes); both recovered.
+ * Expected: load = MSG_TASK_DEPLOY | MSG_ACK_NO_SPACE (2 bytes); both recovered.
  */
 static void test_ack_roundtrip(void)
 {
     uint8_t load[PROTOCOL_MAX_LOAD_SIZE];
-    msg_ack_t message = {MSG_TASK_DEPLOY, ACK_NO_SPACE}, recovered;
+    msg_ack_t message = {MSG_TASK_DEPLOY, MSG_ACK_NO_SPACE}, recovered;
 
     int load_len = msg_ack_pack(&message, load, sizeof load);
-    assert(load_len == 2 && load[0] == MSG_TASK_DEPLOY && load[1] == ACK_NO_SPACE);
+    assert(load_len == 2 && load[0] == MSG_TASK_DEPLOY && load[1] == MSG_ACK_NO_SPACE);
     assert(msg_ack_unpack(load, (size_t)load_len, &recovered) == PROTOCOL_OK);
-    assert(recovered.acked_type == MSG_TASK_DEPLOY && recovered.status == ACK_NO_SPACE);
+    assert(recovered.acked_type == MSG_TASK_DEPLOY && recovered.status == MSG_ACK_NO_SPACE);
 }
 
 /**
