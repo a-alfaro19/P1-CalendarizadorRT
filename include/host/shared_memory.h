@@ -54,6 +54,7 @@ typedef struct
  */
 typedef struct
 {
+    uint64_t last_report_ns; /* Último reporte válido, medido con CLOCK_MONOTONIC. */
     bool active;                        /**< Whether the node is active. */
     uint32_t last_tick;                 /**< Most recent tick reported by the node. */
     uint16_t bad_frames;                /**< Invalid frames reported by the node. */
@@ -71,6 +72,7 @@ typedef struct
 typedef struct
 {
     ipc_queue_t commands[SHARED_NUM_NODES];          /* Planner -> one driver per queue. */
+    ipc_queue_t controls; /* Consola -> planificador, separada de las respuestas seriales. */
     ipc_queue_t responses;                           /* Drivers -> planner; multiple producers. */
     ipc_queue_t events;                              /* Drivers and planner -> report; multiple producers. */
     startup_status_t startup;
@@ -228,7 +230,8 @@ typedef enum
 {
     SHARED_QUEUE_COMMAND,
     SHARED_QUEUE_RESPONSE,
-    SHARED_QUEUE_EVENT
+    SHARED_QUEUE_EVENT,
+    SHARED_QUEUE_CONTROL
 } shared_queue_channel_t;
 int shared_memory_send(shared_memory_t *memory, shared_queue_channel_t channel,
                        int node_id, const ipc_message_t *message, int timeout_ms);
@@ -238,3 +241,5 @@ int shared_memory_receive(shared_memory_t *memory, shared_queue_channel_t channe
 /* El planificador publica el estado; el supervisor y las pruebas lo consultan. */
 int shared_memory_write_startup(shared_memory_t *memory, const startup_status_t *status);
 int shared_memory_read_startup(shared_memory_t *memory, startup_status_t *status);
+
+int shared_memory_set_missed_reports(shared_memory_t *memory, int node_id, uint32_t missed);

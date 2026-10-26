@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include "protocol/message.h"
 #include "host/startup.h"
+#include "host/scheduler/task.h"
 
 #define IPC_QUEUE_CAPACITY 64
 #define IPC_REASON_LENGTH 128
@@ -23,6 +24,10 @@ typedef enum
     IPC_TICK,
     IPC_ASSIGNMENT,
     IPC_STARTUP,
+    IPC_ADD_TASK,
+    IPC_FAIL_NODE,
+    IPC_ISOLATE,
+    IPC_STATUS,
     IPC_SHUTDOWN
 } ipc_message_type_t;
 
@@ -35,6 +40,7 @@ typedef struct
     startup_timing_t timing;
     union
     {
+        Task task;
         startup_status_t startup;
         msg_calib_req_t calibrate;
         msg_task_deploy_t deploy;
@@ -48,6 +54,7 @@ typedef struct
         {
             int task_id;
             int accepted;
+            int confirmed;
             int cost_ticks;
             char reason[IPC_REASON_LENGTH];
         } assignment;

@@ -269,7 +269,8 @@ static int assign_task(PlannerState *state,
 
     if (task->id < 0 || task->id >= UINT8_MAX || task->work <= 0 ||
         task->period <= 0 || task->period > UINT16_MAX ||
-        task->deadline <= 0 || task->deadline > UINT16_MAX ||
+        task->deadline <= 0 || task->deadline > UINT16_MAX || task->deadline > task->period ||
+        task->criticality < 0 ||
         (task->type != TASK_PERIODIC && task->type != TASK_SPORADIC)) {
         snprintf(assignment->reason, REJECTION_REASON_LENGTH,
                  "Parámetros fuera del rango del protocolo serial");

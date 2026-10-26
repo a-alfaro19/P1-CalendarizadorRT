@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "host/scheduler_runtime.h"
+#include "host/runtime.h"
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -366,26 +367,5 @@ int scheduler_run(shared_memory_t *memory, const HostConfig *config,
     PlannerState planner;
     if (scheduler_bootstrap(memory, config, tasks, task_count, node_count, 30000, &planner) < 0)
         return -1;
-    for (;;)
-    {
-        ipc_message_t response;
-        if (shared_memory_receive(memory, SHARED_QUEUE_RESPONSE, 0, &response, -1) < 0)
-        {
-            if (errno == EINTR)
-                continue;
-            return -1;
-        }
-        if (response.type == IPC_SHUTDOWN)
-            return 0;
-        if (response.type == IPC_NODE_DOWN || response.type == IPC_ERROR)
-        {
-            fprintf(stderr, "[Planificador] Nodo %d: %.128s; recuperación pendiente.\n",
-                    response.node_id, response.payload.error.reason);
-            if (shared_memory_send(memory, SHARED_QUEUE_EVENT, 0, &response, 1000) < 0)
-                return -1;
-            /* La reubicacion automatica se incorpora con la gestion de fallas */
-            errno = EIO;
-            return -1;
-        }
-    }
+    return host_runtime_loop(memory, config, &planner);
 }

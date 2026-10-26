@@ -198,6 +198,10 @@ void node_driver_run(int node_id, const char *tty_device, ring_buffer_t *tx_rb,
             int rc = shared_memory_receive(&memory, SHARED_QUEUE_COMMAND, node_id, &command, 0);
             if (rc == 0)
             {
+                if (command.type == IPC_ISOLATE) {
+                    errno = ECANCELED;
+                    goto done;
+                }
                 if (command.type == IPC_SHUTDOWN)
                 {
                     result = EXIT_SUCCESS;

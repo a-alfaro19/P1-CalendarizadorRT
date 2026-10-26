@@ -23,7 +23,7 @@ SCHEDULER_SRCS := $(shell find src/host/scheduler -name "*.c")
 SCHEDULER_OBJS := $(patsubst src/host/scheduler/%.c,$(BUILD_DIR)/obj/host/scheduler/%.o,$(SCHEDULER_SRCS))
 
 # Host Commons objects
-HOST_COMM_SRCS := src/host/scheduler_runtime.c src/host/ipc_queue.c src/host/ring_buffer.c src/host/shared_memory.c src/host/node_driver.c src/host/process_manager.c
+HOST_COMM_SRCS := src/host/runtime.c src/host/console.c src/host/scheduler_runtime.c src/host/ipc_queue.c src/host/ring_buffer.c src/host/shared_memory.c src/host/node_driver.c src/host/process_manager.c
 HOST_COMM_OBJS := $(patsubst src/host/%.c,$(BUILD_DIR)/obj/host/comm/%.o,$(HOST_COMM_SRCS))
 
 # Host binary
