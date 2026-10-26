@@ -13,4 +13,8 @@
  * indices de 16 bits de evq_t. */
 #define EVQ_CAPACIDAD 64u
 
+/* Ventana de debounce del boton de la esporadica: tras una pulsacion
+ * aceptada, los flancos que llegan antes de este tiempo son rebotes. */
+#define DEBOUNCE_MS 50u
+
 #endif
