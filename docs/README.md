@@ -36,9 +36,28 @@ El binario requiere la ruta del archivo de configuración y las velocidades asoc
 - **Modo Simulación de Falla** (configurado para dos nodos):
 
   Para simular la caída de un nodo (por ejemplo, el Nodo 1) durante la ejecución:
+
   ```bash
   ./bin/host_app config/config_edf.txt 20 12 --fail 1
   ```
+
+### 3. Guardar los logs de ejecución
+
+Para ver la salida del host en la terminal y guardarla a la vez en `host.log`
+(en el directorio desde donde ejecutas el comando), usa `tee`:
+
+```bash
+./bin/host_app config/config.txt 10 2>&1 | tee host.log
+```
+
+Este ejemplo ejecuta el host con un nodo; asegúrate de tener `node2_port=none`
+y de que `node1_port` apunte al puerto serial de la placa. Para ejecutar con dos
+nodos, cambia el comando por el correspondiente y conserva `2>&1 | tee host.log`.
+El archivo se sobrescribe cada vez que ejecutas el comando. Para agregar la
+salida al final del archivo existente, usa `tee -a host.log`.
+
+Detén el host con `Ctrl+C`. La salida que se haya generado hasta entonces queda
+guardada en el archivo de log.
 
 ---
 
