@@ -13,33 +13,29 @@ make host
 
 ### 2. Ejecución de la Aplicación Principal
 
-El binario requiere la ruta del archivo de configuración y las velocidades asociadas a cada nodo:
-
-**Uso general:**
+El binario recibe únicamente el archivo de configuración. El proceso planificador
+solicita la calibración de los nodos y utiliza sus velocidades medidas para
+calcular los costos y asignar las tareas.
 
 ```bash
-./bin/host_app <config_path> <vel_nodo1> [vel_nodo2] [--fail nodo]
+./bin/host_app config/config.txt
 ```
 
-- **Prueba con un nodo** (configurar `node2_port=none`):
+Para un nodo, configurar `node2_port=none`; para dos, indicar ambos puertos.
+Ya no se aceptan velocidades por argumentos ni la opción `--fail`, que no tenía
+una implementación operativa. La simulación de fallas se incorporará con la
+recuperación durante la ejecución.
 
-  ```bash
-  ./bin/host_app config/config.txt 10
-  ```
+El arranque espera las calibraciones, publica las asignaciones en memoria
+compartida, envía tareas y verifica cada ACK. Solo después de confirmar todas
+las tareas envía START a ambos nodos. Cada intercambio tiene un plazo de 30 s;
+una calibración inválida, rechazo o timeout detiene el arranque con un error.
+El campo `assigned` indica confirmación por el nodo, no solo admisión matemática.
 
-- **Dos nodos** (ambos puertos deben existir):
-
-  ```bash
-  ./bin/host_app config/config_edf.txt 20 12
-  ```
-
-- **Modo Simulación de Falla** (configurado para dos nodos):
-
-  Para simular la caída de un nodo (por ejemplo, el Nodo 1) durante la ejecución:
-
-  ```bash
-  ./bin/host_app config/config_edf.txt 20 12 --fail 1
-  ```
+El proceso de reporte consume la cola y muestra admisiones y eventos en consola.
+El Gantt, la persistencia del reporte, las tareas manuales, la recuperación de
+fallas y el cierre por `q` siguen pendientes. Ctrl+C termina los procesos y libera
+la memoria; todavía no realiza el intercambio STOP/ACK con las placas.
 
 ### 3. Guardar los logs de ejecución
 
@@ -47,7 +43,7 @@ Para ver la salida del host en la terminal y guardarla a la vez en `host.log`
 (en el directorio desde donde ejecutas el comando), usa `tee`:
 
 ```bash
-./bin/host_app config/config.txt 10 2>&1 | tee host.log
+./bin/host_app config/config.txt 2>&1 | tee host.log
 ```
 
 Este ejemplo ejecuta el host con un nodo; asegúrate de tener `node2_port=none`
@@ -64,15 +60,14 @@ guardada en el archivo de log.
 ## Pruebas
 
 ```bash
-make clean
-make
-make run
-make test-failure
-make test-edf
-make test-rms
-make test-ff
-make test-wf
+make host
+make test-scheduler_runtime test-node_driver test-ipc_queue test-shared_memory
 ```
+
+Las pruebas del planificador comprueban velocidades medidas, respuestas fuera de
+orden, correlación de ACK, timeout, calibración inválida, rechazo de despliegue y
+límites de admisión del nodo. Las pruebas seriales conectan dos controladores y
+el planificador mediante pseudoterminales y verifican el arranque completo.
 
 ## Firmware para NodeMCU ESP8266
 
@@ -89,12 +84,12 @@ los mensajes de depuración compartirían el canal binario del protocolo. Para
 cargar el firmware, detén primero el host.
 
 Para probar solo la NodeMCU, establece `node2_port=none` en la configuración
-del host. Así se ejecuta un solo driver y solo se necesita la velocidad del
+del host. Así se ejecuta un solo driver y se calibra el
 nodo conectado:
 
 ```bash
 make host
-./bin/host_app config/config.txt 10
+./bin/host_app config/config.txt
 ```
 
 Usa el puerto USB de la NodeMCU como `node1_port` (por ejemplo,

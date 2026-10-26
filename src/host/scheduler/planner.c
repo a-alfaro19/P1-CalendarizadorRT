@@ -1,5 +1,7 @@
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
+#include "node/scheduler/sched_config.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -120,11 +122,16 @@ static int node_accepts_task(const PlannerState *state,
 {
     const NodePlan *node = &state->nodes[node_index];
 
-    if (!node->info.active || node->task_count >= MAX_TASKS_PER_NODE)
+    if (!node->info.active || node->task_count >= (int)MAX_TAREAS)
         return 0;
 
+    if (task->type == TASK_SPORADIC) {
+        for (int i = 0; i < node->task_count; i++)
+            if (node->tasks[i].type == TASK_SPORADIC) return 0;
+    }
+
     int cost = task_cost_ticks(task, node->info.speed_ut_per_tick);
-    if (cost <= 0)
+    if (cost <= 0 || cost > UINT16_MAX)
         return 0;
 
     Task temp_tasks[MAX_TASKS_PER_NODE];
@@ -260,6 +267,15 @@ static int assign_task(PlannerState *state,
     assignment->cost_ticks = -1;
     assignment->utilization = 0.0;
 
+    if (task->id < 0 || task->id >= UINT8_MAX || task->work <= 0 ||
+        task->period <= 0 || task->period > UINT16_MAX ||
+        task->deadline <= 0 || task->deadline > UINT16_MAX ||
+        (task->type != TASK_PERIODIC && task->type != TASK_SPORADIC)) {
+        snprintf(assignment->reason, REJECTION_REASON_LENGTH,
+                 "Parámetros fuera del rango del protocolo serial");
+        return 0;
+    }
+
     if (check_duplicate && planner_find_task(state, task->id) >= 0)
     {
         snprintf(assignment->reason,
@@ -281,7 +297,7 @@ static int assign_task(PlannerState *state,
     {
         snprintf(assignment->reason,
                  REJECTION_REASON_LENGTH,
-                 "No pasa admision en ningun nodo activo");
+                 "No pasa admisión o excede capacidad/rango del nodo");
         return 0;
     }
 
