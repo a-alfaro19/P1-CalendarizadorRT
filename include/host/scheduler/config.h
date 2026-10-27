@@ -33,6 +33,7 @@ typedef struct
 
     int tick_report_period;
     int max_missed_reports;
+    int command_timeout_ms;
 
     char task_file[MAX_PATH_LENGTH];
 } HostConfig;

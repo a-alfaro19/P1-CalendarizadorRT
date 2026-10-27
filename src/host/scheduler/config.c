@@ -59,6 +59,7 @@ static void set_default_config(HostConfig *config)
 
     config->tick_report_period = 10;
     config->max_missed_reports = 3;
+    config->command_timeout_ms = 1000;
 
     config->task_file[0] = '\0';
 }
@@ -134,7 +135,12 @@ static int parse_config_entry(HostConfig *config,
 
     else if (strcmp(key, "max_missed_reports") == 0)
     {
-        config->max_missed_reports = atoi(value);
+        return parse_tick_value(value, key, &config->max_missed_reports);
+    }
+
+    else if (strcmp(key, "command_timeout_ms") == 0)
+    {
+        return parse_tick_value(value, key, &config->command_timeout_ms);
     }
 
     else if (strcmp(key, "task_file") == 0)
