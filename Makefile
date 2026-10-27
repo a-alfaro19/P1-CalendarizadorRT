@@ -80,6 +80,11 @@ $(HOST_BIN): $(HOST_SRC) $(LIB_PROTOCOL) $(LIB_HOST_COMM) $(LIB_SCHEDULER)
 
 # ---------- Tests Rules ----------
 
+# La calibración portátil necesita su implementación y su directorio de cabeceras.
+$(BUILD_DIR)/$(TEST_DIR)/calibration_tests: $(TEST_DIR)/calibration_tests.c src/node/calibration/calibracion.c include/node/calibration/calibracion.h $(TEST_DIR)/test_harness.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(SANFLAGS) -Iinclude/node/calibration -Itests $< src/node/calibration/calibracion.c -o $@
+
 # Node scheduler tests
 $(BUILD_DIR)/$(TEST_DIR)/node_scheduler_tests: $(TEST_DIR)/node_scheduler_tests.c $(NODE_SCHEDULER_SRCS) $(NODE_SCHEDULER_HEADERS) $(TEST_DIR)/test_harness.h
 	@mkdir -p $(dir $@)
@@ -96,7 +101,7 @@ $(BUILD_DIR)/$(TEST_DIR)/ipc_queue_tests: $(TEST_DIR)/ipc_queue_tests.c src/host
 	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< src/host/ipc_queue.c src/host/shared_memory.c src/host/ring_buffer.c -pthread -o $@
 
 # Instrumentar también la implementación del planificador y sus controladores.
-$(BUILD_DIR)/$(TEST_DIR)/scheduler_runtime_tests $(BUILD_DIR)/$(TEST_DIR)/node_driver_tests $(BUILD_DIR)/$(TEST_DIR)/report_tests: $(BUILD_DIR)/$(TEST_DIR)/%: $(TEST_DIR)/%.c $(HOST_COMM_SRCS) $(SCHEDULER_SRCS) $(PROTOCOL_SRCS) $(HEADERS) $(TEST_DIR)/test_harness.h
+$(BUILD_DIR)/$(TEST_DIR)/runtime_tests $(BUILD_DIR)/$(TEST_DIR)/scheduler_runtime_tests $(BUILD_DIR)/$(TEST_DIR)/node_driver_tests $(BUILD_DIR)/$(TEST_DIR)/report_tests: $(BUILD_DIR)/$(TEST_DIR)/%: $(TEST_DIR)/%.c $(HOST_COMM_SRCS) $(SCHEDULER_SRCS) $(PROTOCOL_SRCS) $(HEADERS) $(TEST_DIR)/test_harness.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< $(HOST_COMM_SRCS) $(SCHEDULER_SRCS) $(PROTOCOL_SRCS) -lm -pthread -o $@
 

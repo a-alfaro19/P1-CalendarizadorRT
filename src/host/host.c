@@ -131,11 +131,12 @@ static bool any_child_alive(void)
  * reporte) se envia solo cuando ellos ya no existen: la cola es FIFO y el
  * reporte alcanza a procesar todo lo anterior. */
 static int supervise(shared_memory_t *memory, const HostConfig *config,
-                     const pid_t drivers[], int node_count, pid_t scheduler, int automatic_failure)
+                     const pid_t drivers[], int node_count, pid_t scheduler, pid_t reporter, int automatic_failure)
 {
     bool closing = false, input_open = true, discard_line = false;
     bool scheduler_done = false, drivers_told = false, events_closed = false;
     int scheduler_result = EXIT_FAILURE;
+    bool report_failed = false;
     int64_t drain_deadline = 0, final_deadline = 0;
     char line[512];
     size_t used = 0;
@@ -184,6 +185,11 @@ static int supervise(shared_memory_t *memory, const HostConfig *config,
                 drain_deadline = now + DRAIN_TIMEOUT_MS;
                 continue;
             }
+            if (pid == reporter && (!WIFEXITED(status) || WEXITSTATUS(status) != 0))
+            {
+                report_failed = true;
+                fprintf(stderr, "[Host] El proceso de reportes terminó con error.\n");
+            }
             if (scheduler_done)
                 continue;
             int node = 0;
@@ -227,7 +233,7 @@ static int supervise(shared_memory_t *memory, const HostConfig *config,
                 final_deadline = now + DRAIN_TIMEOUT_MS;
             }
             if (!any_child_alive())
-                return scheduler_result;
+                return report_failed ? EXIT_FAILURE : scheduler_result;
             if (events_closed && now >= final_deadline)
             {
                 fprintf(stderr, "[Host] Hay procesos que no terminaron a tiempo; se forzará su cierre.\n");
@@ -347,7 +353,8 @@ int main(int argc, char *argv[])
     }
     int result = EXIT_FAILURE;
     report_args_t report_args = {&memory, &config};
-    if (process_manager_create(&process_manager, report_process, &report_args) < 0)
+    pid_t reporter = process_manager_create(&process_manager, report_process, &report_args);
+    if (reporter < 0)
         goto stop;
     pid_t drivers[SHARED_NUM_NODES] = {0};
     const char *ports[] = {config.node1_port, config.node2_port};
@@ -363,7 +370,7 @@ int main(int argc, char *argv[])
     pid_t scheduler = process_manager_create(&process_manager, scheduler_process, &args);
     if (scheduler < 0)
         goto stop;
-    result = supervise(&memory, &config, drivers, node_count, scheduler, automatic_failure);
+    result = supervise(&memory, &config, drivers, node_count, scheduler, reporter, automatic_failure);
     process_manager_stop(&process_manager);
     process_manager_wait(&process_manager);
     goto cleanup;

@@ -196,8 +196,8 @@ static bool shm_exists(pid_t host)
     return access(path, F_OK) == 0;
 }
 
-/* El cierre puede pedirse con `q` o con Ctrl+C, que una terminal envía a todo el grupo */
-static void run_scenario(bool use_sigint)
+/* El cierre puede pedirse con `q` o con Ctrl+C */
+static void run_scenario(bool use_sigint, bool fail_report)
 {
     char host_path[PATH_MAX];
     assert(realpath("bin/host_app", host_path) && "ejecute `make host` antes de esta prueba");
@@ -219,6 +219,13 @@ static void run_scenario(bool use_sigint)
     snprintf(config, sizeof(config), "%s/config.txt", dir);
     snprintf(log, sizeof(log), "%s/host.log", dir);
     write_text(config, text);
+
+    if (fail_report)
+    {
+        /* Un archivo ocupa la ruta del directorio y fuerza un error de guardado. */
+        snprintf(path, sizeof(path), "%s/reports", dir);
+        write_text(path, "bloqueado");
+    }
 
     int input[2];
     assert(pipe(input) == 0);
@@ -263,24 +270,34 @@ static void run_scenario(bool use_sigint)
             break;
     }
     close(input[1]);
-    assert(quit_sent && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    assert(quit_sent && WIFEXITED(status));
+    assert(fail_report ? WEXITSTATUS(status) != 0 : WEXITSTATUS(status) == 0);
     assert(nodes[0].stopped && nodes[1].stopped);
     assert(!shm_exists(host));
 
-    char reports[PATH_MAX], report[PATH_MAX], csv[PATH_MAX];
-    snprintf(reports, sizeof(reports), "%s/reports", dir);
-    assert(find_file(reports, "reporte_", report, sizeof(report)));
-    assert(find_file(reports, "gantt_nodo", csv, sizeof(csv)));
-    char *body = read_text(report);
-    assert(body);
-    assert(strstr(body, "1. DIAGRAMA DE GANTT") && strstr(body, "6. TAREAS ACEPTADAS Y RECHAZADAS"));
-    assert(strstr(body, "PERDIÓ su plazo"));
-    assert(strstr(body, "trama corrupta descartada"));
-    assert(strstr(body, "ACEPTADA"));
-    free(body);
-    char *output = read_text(log);
-    assert(output && strstr(output, "Reporte guardado en"));
-    free(output);
+    if (!fail_report)
+    {
+        char reports[PATH_MAX], report[PATH_MAX], csv[PATH_MAX];
+        snprintf(reports, sizeof(reports), "%s/reports", dir);
+        assert(find_file(reports, "reporte_", report, sizeof(report)));
+        assert(find_file(reports, "gantt_nodo", csv, sizeof(csv)));
+        char *body = read_text(report);
+        assert(body);
+        assert(strstr(body, "1. DIAGRAMA DE GANTT") && strstr(body, "6. TAREAS ACEPTADAS Y RECHAZADAS"));
+        assert(strstr(body, "PERDIÓ su plazo"));
+        assert(strstr(body, "trama corrupta descartada"));
+        assert(strstr(body, "ACEPTADA"));
+        free(body);
+        char *output = read_text(log);
+        assert(output && strstr(output, "Reporte guardado en"));
+        free(output);
+    }
+    else
+    {
+        char *output = read_text(log);
+        assert(output && strstr(output, "El proceso de reportes terminó con error"));
+        free(output);
+    }
 
     for (int i = 0; i < NODES; i++)
     {
@@ -293,14 +310,17 @@ static void run_scenario(bool use_sigint)
     assert(system(command) == 0);
 }
 
-static void test_quit_writes_report_and_cleans_up(void) { run_scenario(false); }
-static void test_ctrl_c_writes_report_and_cleans_up(void) { run_scenario(true); }
+static void test_quit_writes_report_and_cleans_up(void) { run_scenario(false, false); }
+static void test_ctrl_c_writes_report_and_cleans_up(void) { run_scenario(true, false); }
+
+static void test_report_failure_is_propagated(void) { run_scenario(false, true); }
 
 int main(void)
 {
     puts("Host extremo a extremo");
     RUN_TEST(test_quit_writes_report_and_cleans_up);
     RUN_TEST(test_ctrl_c_writes_report_and_cleans_up);
+    RUN_TEST(test_report_failure_is_propagated);
     puts("OK: All host end-to-end tests passed!");
     return 0;
 }

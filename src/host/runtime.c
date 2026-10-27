@@ -25,6 +25,7 @@ typedef struct
     bool confirmed[SHARED_NUM_NODES][UINT8_MAX];
     bool relocated[SHARED_NUM_NODES][UINT8_MAX];
     pending_deploy_t pending[SHARED_NUM_NODES];
+    int64_t enqueue_deadline_ms[SHARED_NUM_NODES];
 } runtime_t;
 
 static int64_t monotonic_ms(void)
@@ -210,10 +211,20 @@ static int dispatch_deployments(runtime_t *runtime, int64_t now)
                                                          (uint16_t)node->costs[j], (uint16_t)task->period, (uint16_t)task->deadline};
             if (shared_memory_send(runtime->memory, SHARED_QUEUE_COMMAND, node->info.id, &command, 0) < 0)
             {
+                if (errno == EAGAIN || errno == EINTR)
+                {
+                    /* no demuestra una falla del nodo. Se
+                     * reintenta ese nodo sin bloquear la atencion de los otros  */
+                    if (!runtime->enqueue_deadline_ms[i])
+                        runtime->enqueue_deadline_ms[i] = now + runtime->command_timeout_ms;
+                    if (now < runtime->enqueue_deadline_ms[i])
+                        break;
+                }
                 if (fail_node(runtime, node->info.id, "Cola del controlador no disponible") < 0)
                     return -1;
                 break;
             }
+            runtime->enqueue_deadline_ms[i] = 0;
             runtime->pending[i] = (pending_deploy_t){true, command.request_id, task->id,
                                                      now + runtime->command_timeout_ms};
             break;
