@@ -137,13 +137,14 @@ static int await_responses(shared_memory_t *memory, const ipc_message_t *command
 }
 
 static int report_assignment(shared_memory_t *memory, const TaskAssignment *assignment,
-                             int timeout_ms)
+                             const Task *task, int timeout_ms)
 {
     ipc_message_t event = {.type = IPC_ASSIGNMENT,
                            .node_id = assignment->accepted ? assignment->node_id : 0};
     event.payload.assignment.task_id = assignment->task_id;
     event.payload.assignment.accepted = assignment->accepted;
     event.payload.assignment.cost_ticks = assignment->cost_ticks;
+    ipc_assignment_set_task(&event, task);
     snprintf(event.payload.assignment.reason, IPC_REASON_LENGTH, "%s", assignment->reason);
     return shared_memory_send(memory, SHARED_QUEUE_EVENT, 0, &event, timeout_ms);
 }
@@ -219,8 +220,15 @@ static int bootstrap_steps(shared_memory_t *memory, const HostConfig *config,
         return -1;
     /* La admision y la confirmacion son estados distintos: assigned cambia tras el ACK */
     for (int i = 0; i < task_count; i++)
-        if (report_assignment(memory, &assignments[i], timeout_ms) < 0)
+    {
+        /* El planificador puede reordenar: la tarea se busca por id, no por posición */
+        const Task *task = NULL;
+        for (int j = 0; j < task_count; j++)
+            if (tasks[j].id == assignments[i].task_id)
+                task = &tasks[j];
+        if (report_assignment(memory, &assignments[i], task, timeout_ms) < 0)
             return -1;
+    }
     for (int i = 0; i < node_count; i++)
     {
         for (int j = 0; j < shared.nodes[i].task_count; j++)

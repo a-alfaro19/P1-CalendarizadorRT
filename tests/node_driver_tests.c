@@ -151,6 +151,9 @@ static void test_driver_ipc_protocol_and_corruption(void)
     uint8_t load[LOAD_SIZE_EVENT];
     assert(msg_event_pack(&event, load, sizeof(load)) == sizeof(load));
     write_frame(driver.master, MSG_EVENT, load, sizeof(load), 0);
+    /* La trama corrupta enviada antes se informa al reporte y luego llega el evento válido */
+    assert(shared_memory_receive(&memory, SHARED_QUEUE_EVENT, 0, &reply, 2000) == 0);
+    assert(reply.type == IPC_BAD_FRAME && reply.node_id == 1);
     assert(shared_memory_receive(&memory, SHARED_QUEUE_EVENT, 0, &reply, 2000) == 0);
     assert(reply.type == IPC_EVENT && reply.payload.event.tick == 4);
     stop_driver(driver, 1);

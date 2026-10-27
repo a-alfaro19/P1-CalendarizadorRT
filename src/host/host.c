@@ -10,7 +10,13 @@
 #include "host/console.h"
 #include "host/node_driver.h"
 #include "host/process_manager.h"
+#include "host/report.h"
 #include "host/scheduler_runtime.h"
+
+/* Directorio (relativo al de ejecución) donde el reporte deja sus archivos */
+#define REPORT_DIRECTORY "reports"
+/* Tiempo que se espera a que drivers y reporte terminen solos tras el planificador */
+#define DRAIN_TIMEOUT_MS 10000
 
 static process_manager_t process_manager;
 
@@ -51,118 +57,24 @@ static void driver_process(void *arg)
                     args->memory->name, &args->config);
 }
 
-static const char *startup_phase_name(startup_phase_t phase)
+typedef struct
 {
-    switch (phase)
-    {
-    case STARTUP_IDLE:
-        return "pendiente";
-    case STARTUP_CALIBRATING:
-        return "calibrando";
-    case STARTUP_PLANNING:
-        return "planificando";
-    case STARTUP_DEPLOYING:
-        return "desplegando";
-    case STARTUP_STARTING:
-        return "iniciando";
-    case STARTUP_RUNNING:
-        return "en ejecución";
-    case STARTUP_ABORTING:
-        return "cancelando";
-    case STARTUP_FAILED:
-        return "fallido";
-    }
-    return "desconocido";
-}
-
-static void report_startup(const startup_status_t *status)
-{
-    printf("[Arranque] Estado: %s.\n", startup_phase_name(status->phase));
-    if (status->phase == STARTUP_RUNNING && status->timing_valid)
-    {
-        for (int i = 0; i < status->node_count; i++)
-        {
-            startup_timing_t t = status->nodes[i].start;
-            printf("[Arranque] Nodo %d: %u UT/tick, tareas=%u/%u; "
-                   "START host tx_inicio=%llu tx_fin=%llu ack=%llu ns; "
-                   "retraso respecto al objetivo=%.3f ms.\n",
-                   i + 1, status->nodes[i].speed_ut_per_tick,
-                   status->nodes[i].confirmed_tasks, status->nodes[i].planned_tasks,
-                   (unsigned long long)t.tx_begin_ns, (unsigned long long)t.tx_end_ns,
-                   (unsigned long long)t.ack_ns,
-                   (double)(t.tx_begin_ns - status->target_start_ns) / 1e6);
-        }
-        if (status->node_count == 2)
-        {
-            printf("[Arranque] Desfase de envío observado en host: %.3f ms; "
-                   "intervalo estimado cero2-cero1: [%.3f, %.3f] ms.\n",
-                   (double)status->tx_skew_ns / 1e6,
-                   (double)status->zero_delta_min_ns / 1e6,
-                   (double)status->zero_delta_max_ns / 1e6);
-        }
-        else
-            printf("[Arranque] Un nodo: no aplica desfase entre nodos.\n");
-    }
-    else if (status->phase == STARTUP_FAILED)
-    {
-        fprintf(stderr, "[Arranque] Fallo en %s: nodo=%d solicitud=%u errno=%d.\n",
-                startup_phase_name(status->failed_phase), status->failed_node,
-                status->failed_request, status->error_code);
-    }
-}
+    shared_memory_t *memory;
+    const HostConfig *config;
+} report_args_t;
 
 static void report_process(void *arg)
 {
-    shared_memory_t *memory = arg;
-    /* Consumir desde el arranque evita llenar la cola con las admisiones.
-     * El reporte persistente y el Gantt se incorporan en el paso de reportes. */
-    for (;;)
-    {
-        ipc_message_t event;
-        if (shared_memory_receive(memory, SHARED_QUEUE_EVENT, 0, &event, -1) < 0)
-        {
-            if (errno == EINTR)
-                continue;
-            perror("[Reporte] Error leyendo eventos");
-            _exit(EXIT_FAILURE);
-        }
-        if (event.type == IPC_SHUTDOWN)
-            return;
-        if (event.type == IPC_STARTUP)
-        {
-            report_startup(&event.payload.startup);
-        }
-        else if (event.type == IPC_ASSIGNMENT)
-        {
-            printf("[Reporte] Tarea %d: %s, nodo=%d, C=%d; %.128s\n",
-                   event.payload.assignment.task_id,
-                   event.payload.assignment.accepted ?
-                       (event.payload.assignment.confirmed ? "confirmada" : "admitida, pendiente") : "rechazada",
-                   event.node_id, event.payload.assignment.cost_ticks,
-                   event.payload.assignment.reason);
-        }
-        else if (event.type == IPC_EVENT)
-        {
-            printf("[Reporte] Nodo %d: evento=%u tarea=%u tick=%u aux=%u\n",
-                   event.node_id, event.payload.event.event_type,
-                   event.payload.event.task_id, event.payload.event.tick, event.payload.event.aux);
-        }
-        else if (event.type == IPC_TICK)
-        {
-            printf("[Reporte] Nodo %d: tick=%u tramas inválidas=%u\n",
-                   event.node_id, event.payload.tick.tick, event.payload.tick.bad_frames);
-        }
-        else if (event.type == IPC_ERROR || event.type == IPC_NODE_DOWN)
-        {
-            fprintf(stderr, "[Reporte] Nodo %d: %.128s\n", event.node_id, event.payload.error.reason);
-        }
-    }
+    report_args_t *args = arg;
+    if (report_run(args->memory, args->config, REPORT_DIRECTORY) < 0)
+        _exit(EXIT_FAILURE);
 }
 
 static int64_t host_now_ms(void)
 {
     struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0) return -1;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
+        return -1;
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
@@ -170,100 +82,214 @@ static int submit_line(shared_memory_t *memory, const char *line, bool *closing)
 {
     ipc_message_t command;
     int parsed = host_parse_command(line, &command);
-    if (parsed > 0) { host_print_help(); return 0; }
-    if (parsed < 0) {
+    if (parsed > 0)
+    {
+        host_print_help();
+        return 0;
+    }
+    if (parsed < 0)
+    {
         fprintf(stderr, "[Consola] Orden inválida. Use help para ver el formato.\n");
         return 0;
     }
-    if (shared_memory_send(memory, SHARED_QUEUE_CONTROL, 0, &command, 0) < 0) {
+    if (shared_memory_send(memory, SHARED_QUEUE_CONTROL, 0, &command, 0) < 0)
+    {
         fprintf(stderr, "[Consola] No se pudo encolar la orden; vuelva a intentarlo.\n");
         return 0;
     }
-    if (command.type == IPC_SHUTDOWN) *closing = true;
+    if (command.type == IPC_SHUTDOWN)
+        *closing = true;
     return 0;
 }
 
+static bool child_alive(pid_t pid)
+{
+    for (size_t i = 0; i < process_manager.count; i++)
+        if (process_manager.pids[i] == pid)
+            return true;
+    return false;
+}
+
+static bool drivers_alive(const pid_t drivers[], int node_count)
+{
+    for (int i = 0; i < node_count; i++)
+        if (child_alive(drivers[i]))
+            return true;
+    return false;
+}
+
+static bool any_child_alive(void)
+{
+    for (size_t i = 0; i < process_manager.count; i++)
+        if (process_manager.pids[i] > 0)
+            return true;
+    return false;
+}
+
+/* Cierre posterior al planificador. Los drivers pueden seguir enviando eventos
+ * hasta salir, por eso el fin de la cola de eventos (que hace terminar al
+ * reporte) se envia solo cuando ellos ya no existen: la cola es FIFO y el
+ * reporte alcanza a procesar todo lo anterior. */
 static int supervise(shared_memory_t *memory, const HostConfig *config,
                      const pid_t drivers[], int node_count, pid_t scheduler, int automatic_failure)
 {
     bool closing = false, input_open = true, discard_line = false;
+    bool scheduler_done = false, drivers_told = false, events_closed = false;
+    int scheduler_result = EXIT_FAILURE;
+    int64_t drain_deadline = 0, final_deadline = 0;
     char line[512];
     size_t used = 0;
     int64_t close_deadline = 0;
     host_print_help();
-    for (;;) {
+    for (;;)
+    {
         startup_status_t startup;
-        if (shared_memory_read_startup(memory, &startup) < 0) return EXIT_FAILURE;
-        if (automatic_failure && startup.phase == STARTUP_RUNNING) {
+        if (shared_memory_read_startup(memory, &startup) < 0)
+            return EXIT_FAILURE;
+        if (automatic_failure && startup.phase == STARTUP_RUNNING)
+        {
             ipc_message_t command = {.type = IPC_FAIL_NODE, .node_id = automatic_failure};
             if (shared_memory_send(memory, SHARED_QUEUE_CONTROL, 0, &command, 0) == 0)
                 automatic_failure = 0;
         }
-        if (process_manager_shutdown_requested(&process_manager) && !closing) {
-            if (startup.phase != STARTUP_RUNNING) return EXIT_SUCCESS;
+        if (process_manager_shutdown_requested(&process_manager) && !closing && !scheduler_done)
+        {
+            if (startup.phase != STARTUP_RUNNING)
+                return EXIT_SUCCESS;
             ipc_message_t command = {.type = IPC_SHUTDOWN};
-            if (shared_memory_send(memory, SHARED_QUEUE_CONTROL, 0, &command, 0) == 0) closing = true;
+            if (shared_memory_send(memory, SHARED_QUEUE_CONTROL, 0, &command, 0) == 0)
+                closing = true;
         }
         int64_t now = host_now_ms();
-        if (now < 0) return EXIT_FAILURE;
+        if (now < 0)
+            return EXIT_FAILURE;
         if (closing && !close_deadline)
             close_deadline = now + 30000 + config->command_timeout_ms;
-        if (closing && now >= close_deadline) {
+        if (closing && !scheduler_done && now >= close_deadline)
+        {
             fprintf(stderr, "[Host] Venció el plazo para cerrar el planificador.\n");
             return EXIT_FAILURE;
         }
         int status;
         pid_t pid;
-        while ((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+        while ((pid = waitpid(-1, &status, WNOHANG)) > 0)
+        {
             for (size_t i = 0; i < process_manager.count; i++)
-                if (process_manager.pids[i] == pid) process_manager.pids[i] = 0;
+                if (process_manager.pids[i] == pid)
+                    process_manager.pids[i] = 0;
             if (pid == scheduler)
-                return closing && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
-            int node = 0;
-            for (int i = 0; i < node_count; i++) if (drivers[i] == pid) node = i + 1;
-            if (node && startup.phase == STARTUP_RUNNING && !closing) {
-                ipc_message_t down = {.type = IPC_NODE_DOWN, .node_id = node};
-                snprintf(down.payload.error.reason, IPC_REASON_LENGTH, "El proceso controlador terminó");
-                if (shared_memory_send(memory, SHARED_QUEUE_RESPONSE, 0, &down, 100) < 0) return EXIT_FAILURE;
+            {
+                scheduler_done = true;
+                scheduler_result = closing && WIFEXITED(status) && WEXITSTATUS(status) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+                drain_deadline = now + DRAIN_TIMEOUT_MS;
                 continue;
             }
-            if (!closing) {
+            if (scheduler_done)
+                continue;
+            int node = 0;
+            for (int i = 0; i < node_count; i++)
+                if (drivers[i] == pid)
+                    node = i + 1;
+            if (node && startup.phase == STARTUP_RUNNING && !closing)
+            {
+                ipc_message_t down = {.type = IPC_NODE_DOWN, .node_id = node};
+                snprintf(down.payload.error.reason, IPC_REASON_LENGTH, "El proceso controlador terminó");
+                if (shared_memory_send(memory, SHARED_QUEUE_RESPONSE, 0, &down, 100) < 0)
+                    return EXIT_FAILURE;
+                continue;
+            }
+            if (!closing)
+            {
                 fprintf(stderr, "[Host] Proceso esencial %ld terminó inesperadamente.\n", (long)pid);
                 return EXIT_FAILURE;
             }
         }
-        if (pid < 0 && errno != ECHILD && errno != EINTR) return EXIT_FAILURE;
-        struct pollfd input = {.fd = input_open && !closing ? STDIN_FILENO : -1, .events = POLLIN};
+        if (pid < 0 && errno != ECHILD && errno != EINTR)
+            return EXIT_FAILURE;
+        if (scheduler_done)
+        {
+            if (!drivers_told)
+            {
+                /* Sin planificador nadie más les ordena terminar; es idempotente si ya lo hizo */
+                for (int i = 0; i < node_count; i++)
+                {
+                    ipc_message_t end = {.type = IPC_SHUTDOWN, .node_id = i + 1};
+                    shared_memory_send(memory, SHARED_QUEUE_COMMAND, i + 1, &end, 0);
+                }
+                drivers_told = true;
+            }
+            if (!events_closed && (!drivers_alive(drivers, node_count) || now >= drain_deadline))
+            {
+                ipc_message_t end = {.type = IPC_SHUTDOWN};
+                if (shared_memory_send(memory, SHARED_QUEUE_EVENT, 0, &end, 1000) < 0)
+                    perror("[Host] No se pudo cerrar la cola de eventos");
+                events_closed = true;
+                final_deadline = now + DRAIN_TIMEOUT_MS;
+            }
+            if (!any_child_alive())
+                return scheduler_result;
+            if (events_closed && now >= final_deadline)
+            {
+                fprintf(stderr, "[Host] Hay procesos que no terminaron a tiempo; se forzará su cierre.\n");
+                return EXIT_FAILURE;
+            }
+        }
+        struct pollfd input = {.fd = input_open && !closing && !scheduler_done ? STDIN_FILENO : -1, .events = POLLIN};
         int ready = poll(&input, 1, 50);
-        if (ready < 0) { if (errno == EINTR) continue; return EXIT_FAILURE; }
-        if (ready && (input.revents & (POLLIN | POLLHUP))) {
+        if (ready < 0)
+        {
+            if (errno == EINTR)
+                continue;
+            return EXIT_FAILURE;
+        }
+        if (ready && (input.revents & (POLLIN | POLLHUP)))
+        {
             char bytes[256];
             ssize_t count = read(STDIN_FILENO, bytes, sizeof(bytes));
-            if (count < 0) { if (errno == EINTR) continue; input_open = false; }
-            else if (count == 0) {
+            if (count < 0)
+            {
+                if (errno == EINTR)
+                    continue;
                 input_open = false;
-                if (used && !discard_line) {
+            }
+            else if (count == 0)
+            {
+                input_open = false;
+                if (used && !discard_line)
+                {
                     line[used] = '\0';
                     submit_line(memory, line, &closing);
                 }
                 used = 0;
-            } else for (ssize_t i = 0; i < count && !closing; i++) {
-                if (bytes[i] == '\n') {
-                    if (!discard_line) {
-                        line[used] = '\0';
-                        submit_line(memory, line, &closing);
-                    }
-                    used = 0;
-                    discard_line = false;
-                } else if (!discard_line) {
-                    if (used + 1 >= sizeof(line) || bytes[i] == '\0') {
-                        fprintf(stderr, "[Consola] Línea demasiado larga o inválida; descartada.\n");
-                        discard_line = true;
-                        used = 0;
-                    } else line[used++] = bytes[i];
-                }
             }
-        } else if (ready && (input.revents & (POLLERR | POLLNVAL))) input_open = false;
+            else
+                for (ssize_t i = 0; i < count && !closing; i++)
+                {
+                    if (bytes[i] == '\n')
+                    {
+                        if (!discard_line)
+                        {
+                            line[used] = '\0';
+                            submit_line(memory, line, &closing);
+                        }
+                        used = 0;
+                        discard_line = false;
+                    }
+                    else if (!discard_line)
+                    {
+                        if (used + 1 >= sizeof(line) || bytes[i] == '\0')
+                        {
+                            fprintf(stderr, "[Consola] Línea demasiado larga o inválida; descartada.\n");
+                            discard_line = true;
+                            used = 0;
+                        }
+                        else
+                            line[used++] = bytes[i];
+                    }
+                }
+        }
+        else if (ready && (input.revents & (POLLERR | POLLNVAL)))
+            input_open = false;
     }
 }
 
@@ -276,8 +302,10 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
     int automatic_failure = 0;
-    if (argc == 4) {
-        if (strcmp(argv[2], "--fail") || (strcmp(argv[3], "1") && strcmp(argv[3], "2"))) {
+    if (argc == 4)
+    {
+        if (strcmp(argv[2], "--fail") || (strcmp(argv[3], "1") && strcmp(argv[3], "2")))
+        {
             fprintf(stderr, "[Host] Use --fail 1 o --fail 2.\n");
             return EXIT_FAILURE;
         }
@@ -291,7 +319,8 @@ int main(int argc, char *argv[])
     if (task_count < 0)
         return EXIT_FAILURE;
     int node_count = config.node2_port[0] ? 2 : 1;
-    if (automatic_failure > node_count) {
+    if (automatic_failure > node_count)
+    {
         fprintf(stderr, "[Host] El nodo indicado para --fail no está configurado.\n");
         return EXIT_FAILURE;
     }
@@ -317,7 +346,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
     int result = EXIT_FAILURE;
-    if (process_manager_create(&process_manager, report_process, &memory) < 0)
+    report_args_t report_args = {&memory, &config};
+    if (process_manager_create(&process_manager, report_process, &report_args) < 0)
         goto stop;
     pid_t drivers[SHARED_NUM_NODES] = {0};
     const char *ports[] = {config.node1_port, config.node2_port};

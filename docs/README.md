@@ -13,36 +13,65 @@ make host
 
 ### 2. Ejecución de la Aplicación Principal
 
-El binario recibe únicamente el archivo de configuración. El proceso planificador
-solicita la calibración de los nodos y utiliza sus velocidades medidas para
-calcular los costos y asignar las tareas.
+El binario recibe el archivo de configuración y, opcionalmente, `--fail 1|2`
+para simular la caída de un nodo en cuanto el sistema esté en ejecución.
+El planificador solicita la calibración de los nodos y utiliza sus velocidades
+medidas para calcular los costos y asignar las tareas.
 
 ```bash
 ./bin/host_app config/config.txt
+./bin/host_app config/config_failure.txt --fail 2
 ```
 
 Para un nodo, configurar `node2_port=none`; para dos, indicar ambos puertos.
-Ya no se aceptan velocidades por argumentos ni la opción `--fail`, que no tenía
-una implementación operativa. La simulación de fallas se incorporará con la
-recuperación durante la ejecución.
 
-El arranque espera las calibraciones, publica las asignaciones en memoria
-compartida, envía tareas y verifica cada ACK. Solo después de confirmar todas
-las tareas envía START a ambos nodos. Cada intercambio tiene un plazo de 30 s;
-una calibración inválida, rechazo o timeout cancela el arranque y solicita STOP
-a todos los nodos, con espera limitada y confirmación por separado. Si el STOP
-no se confirma, el host no puede asegurar que esa placa se haya detenido.
-El campo `assigned` indica confirmación por el nodo, no solo admisión matemática.
+#### Procesos del host
+
+| Proceso | Función |
+|---|---|
+| Supervisor (`main`, `host.c`) | Crea los demás procesos, atiende la consola y las señales, y coordina el cierre |
+| Planificador | Calibración, admisión (First-Fit / Worst-Fit), despliegue con ACK, START, detección de nodos caídos y replanificación |
+| Controlador por nodo | Un proceso por puerto serial: tramas con CRC, órdenes del planificador y eventos del nodo |
+| Reporte | Consume la cola de eventos, muestra la actividad en vivo y genera el reporte final |
+
+Se comunican por memoria compartida POSIX con semáforos. Las colas son
+acotadas: órdenes por nodo, respuestas (controladores → planificador), control
+(consola → planificador) y eventos (controladores y planificador → reporte).
+
+#### Consola
+
+| Orden | Efecto |
+|---|---|
+| `add id,P\|S,W,T,D,criticidad` | Agrega una tarea sin detener los nodos (vuelve a pasar la admisión) |
+| `spor nodo` | Libera la tarea esporádica del nodo, igual que su botón físico |
+| `fail nodo` | Simula la caída del nodo 1 o 2 |
+| `status` | Muestra asignaciones y nodos activos |
+| `q` | Cierre ordenado (también `Ctrl+C`) |
+
+#### Cierre y reporte
+
+Con `q` o `Ctrl+C` el planificador envía STOP a cada nodo y espera su ACK; luego
+el supervisor pide terminar a los controladores y, cuando ya no quedan, cierra la
+cola de eventos para que el reporte procese todo lo pendiente. Al final no
+quedan procesos ni objetos en `/dev/shm`, y se cierran los puertos seriales.
+Los hijos ignoran `SIGINT`: solo el supervisor reacciona a `Ctrl+C`.
+
+El reporte se guarda en `reports/` (relativo al directorio de ejecución):
+
+- `reporte_<fecha>.txt`: Gantt por nodo, liberaciones/plazos/fallas, estadísticas
+  por tarea (con la latencia de las esporádicas), utilización teórica y medida,
+  cambios de tarea, y tareas aceptadas/rechazadas con su motivo.
+- `gantt_nodoN_<fecha>.csv`: tramos `tarea,tick_inicio,tick_fin` para graficar.
+
+Límites del reporte: el texto muestra los primeros 400 ticks del Gantt; se
+almacenan hasta 8192 tramos por nodo y 4096 eventos en la línea de tiempo. Si se
+superan, el reporte lo indica, pero las estadísticas y la utilización siguen
+exactas. La utilización medida llega hasta el último tick observado del nodo.
 
 START usa un objetivo común de tiempo del host. El log muestra el desfase entre
 los envíos y un intervalo conservador para la diferencia entre los ticks cero.
 Son observaciones del host; la medición física en las placas sigue siendo una
 validación necesaria.
-
-El proceso de reporte consume la cola y muestra admisiones y eventos en consola.
-El Gantt, la persistencia del reporte, las tareas manuales, la recuperación de
-fallas y el cierre por `q` siguen pendientes. Ctrl+C termina los procesos y libera
-la memoria; todavía no realiza el intercambio STOP/ACK con las placas.
 
 ### 3. Guardar los logs de ejecución
 
@@ -59,7 +88,7 @@ nodos, cambia el comando por el correspondiente y conserva `2>&1 | tee host.log`
 El archivo se sobrescribe cada vez que ejecutas el comando. Para agregar la
 salida al final del archivo existente, usa `tee -a host.log`.
 
-Detén el host con `Ctrl+C`. La salida que se haya generado hasta entonces queda
+Detén el host con `q` o `Ctrl+C`. La salida que se haya generado hasta entonces queda
 guardada en el archivo de log.
 
 ---
@@ -68,8 +97,13 @@ guardada en el archivo de log.
 
 ```bash
 make host
-make test-scheduler_runtime test-node_driver test-ipc_queue test-shared_memory
+make test-scheduler_runtime test-node_driver test-ipc_queue test-shared_memory \
+     test-report test-host_e2e
 ```
+
+`test-host_e2e` ejecuta `bin/host_app` con dos nodos simulados por
+pseudoterminales, pide el cierre con `q` y con `Ctrl+C`, y comprueba el reporte,
+la salida con código 0 y la liberación de la memoria compartida.
 
 Las pruebas del planificador comprueban velocidades medidas, respuestas fuera de
 orden, correlación de ACK, timeout, calibración inválida, rechazo de despliegue y

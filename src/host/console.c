@@ -61,6 +61,10 @@ int host_parse_command(const char *line, ipc_message_t *command)
         parsed.type = IPC_FAIL_NODE;
         if (number(&p, &parsed.node_id) < 0 || *p ||
             parsed.node_id < 1 || parsed.node_id > HOST_NODE_COUNT) return -1;
+    } else if (len == 4 && !strncmp(start, "spor", len)) {
+        parsed.type = IPC_SPORADIC;
+        if (number(&p, &parsed.node_id) < 0 || *p ||
+            parsed.node_id < 1 || parsed.node_id > HOST_NODE_COUNT) return -1;
     } else if (len == 6 && !strncmp(start, "status", len) && !*p) {
         parsed.type = IPC_STATUS;
     } else if (len == 1 && *start == 'q' && !*p) {
@@ -75,6 +79,7 @@ void host_print_help(void)
     puts("Comandos (Enter para enviar):\n"
          "  add id,P|S,W,T,D,criticidad  Agregar una tarea sin detener los nodos\n"
          "  fail nodo                  Simular desconexión del nodo 1 o 2\n"
+         "  spor nodo                  Liberar la tarea esporádica del nodo (como su botón)\n"
          "  status                     Mostrar asignaciones y nodos activos\n"
          "  q                          Solicitar detención y cerrar el host\n"
          "  help                       Mostrar esta ayuda");

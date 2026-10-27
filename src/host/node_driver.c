@@ -198,7 +198,8 @@ void node_driver_run(int node_id, const char *tty_device, ring_buffer_t *tx_rb,
             int rc = shared_memory_receive(&memory, SHARED_QUEUE_COMMAND, node_id, &command, 0);
             if (rc == 0)
             {
-                if (command.type == IPC_ISOLATE) {
+                if (command.type == IPC_ISOLATE)
+                {
                     errno = ECANCELED;
                     goto done;
                 }
@@ -206,6 +207,13 @@ void node_driver_run(int node_id, const char *tty_device, ring_buffer_t *tx_rb,
                 {
                     result = EXIT_SUCCESS;
                     break;
+                }
+                /* El nodo no confirma los disparos esporadicos: no esperan ACK y no
+                 * pueden pisar la orden en vuelo, asi que se descartan si hay una. */
+                if (waiting && command.type == IPC_SPORADIC)
+                {
+                    fprintf(stderr, "[Controlador %d] Disparo esporádico descartado: hay una orden en curso.\n", node_id);
+                    continue;
                 }
                 if (waiting && command.type != IPC_STOP)
                 {
@@ -221,7 +229,7 @@ void node_driver_run(int node_id, const char *tty_device, ring_buffer_t *tx_rb,
                 offset = 0;
                 while (length < sizeof(bytes_out) && ring_buffer_pop(tx_rb, &bytes_out[length]))
                     length++;
-                waiting = true;
+                waiting = command.type != IPC_SPORADIC;
             }
             else if (errno != EAGAIN && errno != EINTR)
                 goto done;
@@ -293,7 +301,13 @@ void node_driver_run(int node_id, const char *tty_device, ring_buffer_t *tx_rb,
                 }
                 else if (rc == PROTOCOL_ERR_CRC || rc == PROTOCOL_ERR_LEN)
                 {
-                    fprintf(stderr, "[Controlador %d] Trama corrupta descartada (%d).\n", node_id, rc);
+                    /* Se informa al reporte sin bloquear: perder un aviso no justifica frenar el enlace */
+                    ipc_message_t bad = {.type = IPC_BAD_FRAME, .node_id = node_id};
+                    bad.payload.error.code = rc;
+                    snprintf(bad.payload.error.reason, IPC_REASON_LENGTH,
+                             rc == PROTOCOL_ERR_CRC ? "CRC inválido" : "Longitud inválida");
+                    if (shared_memory_send(&memory, SHARED_QUEUE_EVENT, 0, &bad, 0) < 0)
+                        fprintf(stderr, "[Controlador %d] Trama corrupta descartada (%d).\n", node_id, rc);
                 }
             }
         }

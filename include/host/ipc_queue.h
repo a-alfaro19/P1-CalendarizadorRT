@@ -28,6 +28,7 @@ typedef enum
     IPC_FAIL_NODE,
     IPC_ISOLATE,
     IPC_STATUS,
+    IPC_BAD_FRAME, /* Controlador -> reporte: trama serial descartada */
     IPC_SHUTDOWN
 } ipc_message_type_t;
 
@@ -56,6 +57,10 @@ typedef struct
             int accepted;
             int confirmed;
             int cost_ticks;
+            int kind;
+            int period;
+            int deadline;
+            int criticality;
             char reason[IPC_REASON_LENGTH];
         } assignment;
         struct
@@ -65,6 +70,17 @@ typedef struct
         } error;
     } payload;
 } ipc_message_t;
+
+/* Copia los datos de la tarea al evento de asignacion (task puede ser NULL) */
+static inline void ipc_assignment_set_task(ipc_message_t *event, const Task *task)
+{
+    if (!task)
+        return;
+    event->payload.assignment.kind = (int)task->type;
+    event->payload.assignment.period = task->period;
+    event->payload.assignment.deadline = task->deadline;
+    event->payload.assignment.criticality = task->criticality;
+}
 
 typedef struct
 {

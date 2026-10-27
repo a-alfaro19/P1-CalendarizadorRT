@@ -35,7 +35,16 @@ static int64_t monotonic_ms(void)
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static int emit_assignment(runtime_t *runtime, const TaskAssignment *assignment, bool confirmed)
+static const Task *find_task(const Task *tasks, int count, int id)
+{
+    for (int i = 0; i < count; i++)
+        if (tasks[i].id == id)
+            return &tasks[i];
+    return NULL;
+}
+
+static int emit_assignment(runtime_t *runtime, const TaskAssignment *assignment,
+                           const Task *task, bool confirmed)
 {
     ipc_message_t event = {.type = IPC_ASSIGNMENT,
                            .node_id = assignment->accepted ? assignment->node_id : 0};
@@ -43,6 +52,7 @@ static int emit_assignment(runtime_t *runtime, const TaskAssignment *assignment,
     event.payload.assignment.accepted = assignment->accepted;
     event.payload.assignment.confirmed = confirmed;
     event.payload.assignment.cost_ticks = assignment->cost_ticks;
+    ipc_assignment_set_task(&event, task);
     snprintf(event.payload.assignment.reason, IPC_REASON_LENGTH, "%s", assignment->reason);
     return shared_memory_send(runtime->memory, SHARED_QUEUE_EVENT, 0, &event, 1000);
 }
@@ -93,13 +103,18 @@ static int fail_node(runtime_t *runtime, int node_id, const char *reason)
     if (shared_memory_set_node_active(runtime->memory, node_id, false) < 0)
         return -1;
     /* Aislar impide que reportes o ACK tardios vuelvan a incorporar un nodo caido
-     * Equivale a desconectar el cable: la placa puede seguir sola */
+     * Equivale a desconectar el cable, la placa puede seguir sola */
     ipc_message_t isolate = {.type = IPC_ISOLATE, .node_id = node_id};
     if (shared_memory_send(runtime->memory, SHARED_QUEUE_COMMAND, node_id, &isolate, 0) < 0)
         fprintf(stderr, "[Runtime] No se pudo entregar aislamiento al controlador %d.\n", node_id);
     runtime->pending[index].waiting = false;
     memset(runtime->confirmed[index], 0, sizeof(runtime->confirmed[index]));
     memset(runtime->relocated[index], 0, sizeof(runtime->relocated[index]));
+    /* El planificador vacia el nodo caido: se conserva una copia para describir
+     * cada resultado (reubicada o rechazada) en el reporte. */
+    Task failed_tasks[MAX_TASKS_PER_NODE];
+    int failed_count = runtime->planner->nodes[index].task_count;
+    memcpy(failed_tasks, runtime->planner->nodes[index].tasks, sizeof(Task) * (size_t)failed_count);
     TaskAssignment results[MAX_TASKS_PER_NODE];
     int count = 0;
     if (planner_handle_node_failure(runtime->planner, node_id, results, &count) < 0)
@@ -114,7 +129,8 @@ static int fail_node(runtime_t *runtime, int node_id, const char *reason)
             snprintf(results[i].reason, REJECTION_REASON_LENGTH,
                      "Reubicación admitida tras falla del nodo %d; pendiente de ACK", node_id);
         }
-        if (emit_assignment(runtime, &results[i], false) < 0)
+        if (emit_assignment(runtime, &results[i],
+                            find_task(failed_tasks, failed_count, results[i].task_id), false) < 0)
             return -1;
     }
     return sync_plan(runtime);
@@ -148,6 +164,7 @@ static int process_response(runtime_t *runtime, const ipc_message_t *response)
         return -1;
     }
     TaskAssignment result = {.task_id = pending->task_id, .node_id = response->node_id, .cost_ticks = node->costs[slot]};
+    Task deployed = node->tasks[slot]; /* copia: el rechazo la elimina del plan */
     pending->waiting = false;
     if (response->payload.ack.status == MSG_ACK_OK)
     {
@@ -173,7 +190,7 @@ static int process_response(runtime_t *runtime, const ipc_message_t *response)
     }
     if (sync_plan(runtime) < 0)
         return -1;
-    return emit_assignment(runtime, &result, result.accepted != 0);
+    return emit_assignment(runtime, &result, &deployed, result.accepted != 0);
 }
 
 static int dispatch_deployments(runtime_t *runtime, int64_t now)
@@ -232,6 +249,32 @@ static int check_timeouts(runtime_t *runtime, int64_t now)
                 return -1;
         }
     }
+    return 0;
+}
+
+/* Disparo manual de la tarea esporadica del nodo (pulsar boton)
+ * Solo se libera si el nodo la tiene confirmada, el nodo aplica el intervalo min */
+static int release_sporadic(runtime_t *runtime, int node_id)
+{
+    int index = node_index(runtime, node_id);
+    if (index < 0 || !runtime->planner->nodes[index].info.active)
+    {
+        printf("[Runtime] Nodo %d inexistente o inactivo.\n", node_id);
+        return 0;
+    }
+    NodePlan *node = &runtime->planner->nodes[index];
+    for (int j = 0; j < node->task_count; j++)
+    {
+        const Task *task = &node->tasks[j];
+        if (task->type != TASK_SPORADIC || !runtime->confirmed[index][task->id])
+            continue;
+        ipc_message_t command = {.type = IPC_SPORADIC, .node_id = node_id, .request_id = ++runtime->sequence};
+        command.payload.sporadic.task_id = (uint8_t)task->id;
+        if (shared_memory_send(runtime->memory, SHARED_QUEUE_COMMAND, node_id, &command, 0) < 0)
+            printf("[Runtime] No se pudo encolar el disparo para el nodo %d.\n", node_id);
+        return 0;
+    }
+    printf("[Runtime] El nodo %d no tiene una tarea esporádica confirmada.\n", node_id);
     return 0;
 }
 
@@ -334,6 +377,11 @@ int host_runtime_loop(shared_memory_t *memory, const HostConfig *config, Planner
                 else if (fail_node(&runtime, message.node_id, "Falla simulada desde la consola") < 0)
                     return -1;
             }
+            else if (message.type == IPC_SPORADIC)
+            {
+                if (release_sporadic(&runtime, message.node_id) < 0)
+                    return -1;
+            }
             else if (message.type == IPC_ADD_TASK)
             {
                 TaskAssignment result;
@@ -347,7 +395,8 @@ int host_runtime_loop(shared_memory_t *memory, const HostConfig *config, Planner
                     runtime.relocated[i][result.task_id] = false;
                     snprintf(result.reason, REJECTION_REASON_LENGTH, "Admitida; pendiente de confirmación del nodo");
                 }
-                if (sync_plan(&runtime) < 0 || emit_assignment(&runtime, &result, false) < 0)
+                if (sync_plan(&runtime) < 0 ||
+                    emit_assignment(&runtime, &result, &message.payload.task, false) < 0)
                     return -1;
             }
         }
