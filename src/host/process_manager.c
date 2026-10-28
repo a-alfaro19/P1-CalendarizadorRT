@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "host/process_manager.h"
 
 #include <errno.h>
@@ -20,9 +22,13 @@ static void restore_default_child_signals(void)
 {
     struct sigaction action;
     memset(&action, 0, sizeof action);
-    action.sa_handler = SIG_DFL;
     sigemptyset(&action.sa_mask);
+    /* Ctrl+C llega a todo el grupo de procesos,si los hijos murieran con el, el
+     * cierre ordenado (STOP a los nodos y reporte final) no tendria quien esperar.
+     * Solo el supervisor lo atiende.a los hijos los termina SIGTERM. */
+    action.sa_handler = SIG_IGN;
     sigaction(SIGINT, &action, NULL);
+    action.sa_handler = SIG_DFL;
     sigaction(SIGTERM, &action, NULL);
 }
 

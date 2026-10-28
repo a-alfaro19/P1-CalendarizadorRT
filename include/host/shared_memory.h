@@ -6,13 +6,14 @@
 #include <semaphore.h>
 
 #include "host/ring_buffer.h"
+#include "host/ipc_queue.h"
 #include "protocol/message.h"
 
 /** Maximum number of task definitions stored for each node. */
 #define SHARED_MAX_TASKS_PER_NODE 10
 
 /** Maximum number of nodes represented in shared memory. */
-#define SHARED_NUM_NODES 2
+#define SHARED_NUM_NODES HOST_NODE_COUNT
 
 /** Maximum length of a shared memory object name, including its terminator. */
 #define SHARED_MEMORY_NAME_MAX 128
@@ -53,6 +54,7 @@ typedef struct
  */
 typedef struct
 {
+    uint64_t last_report_ns; /* Último reporte válido, medido con CLOCK_MONOTONIC. */
     bool active;                        /**< Whether the node is active. */
     uint32_t last_tick;                 /**< Most recent tick reported by the node. */
     uint16_t bad_frames;                /**< Invalid frames reported by the node. */
@@ -69,6 +71,11 @@ typedef struct
  */
 typedef struct
 {
+    ipc_queue_t commands[SHARED_NUM_NODES];          /* Planner -> one driver per queue. */
+    ipc_queue_t controls; /* Consola -> planificador, separada de las respuestas seriales. */
+    ipc_queue_t responses;                           /* Drivers -> planner; multiple producers. */
+    ipc_queue_t events;                              /* Drivers and planner -> report; multiple producers. */
+    startup_status_t startup;
     uint32_t magic;                                  /**< Shared memory format marker. */
     shared_system_config_t config;                   /**< Task configuration. */
     shared_node_status_t nodes[SHARED_NUM_NODES];    /**< Per-node runtime status. */
@@ -218,3 +225,21 @@ int shared_memory_read_node_status(shared_memory_t *memory,
  */
 ring_buffer_t *shared_memory_tx_ring_buffer(shared_memory_t *memory,
                                             int node_id);
+
+typedef enum
+{
+    SHARED_QUEUE_COMMAND,
+    SHARED_QUEUE_RESPONSE,
+    SHARED_QUEUE_EVENT,
+    SHARED_QUEUE_CONTROL
+} shared_queue_channel_t;
+int shared_memory_send(shared_memory_t *memory, shared_queue_channel_t channel,
+                       int node_id, const ipc_message_t *message, int timeout_ms);
+int shared_memory_receive(shared_memory_t *memory, shared_queue_channel_t channel,
+                          int node_id, ipc_message_t *message, int timeout_ms);
+
+/* El planificador publica el estado; el supervisor y las pruebas lo consultan. */
+int shared_memory_write_startup(shared_memory_t *memory, const startup_status_t *status);
+int shared_memory_read_startup(shared_memory_t *memory, startup_status_t *status);
+
+int shared_memory_set_missed_reports(shared_memory_t *memory, int node_id, uint32_t missed);

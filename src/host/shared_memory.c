@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "host/shared_memory.h"
 
 #include <errno.h>
@@ -6,8 +7,9 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <time.h>
 
-#define SHARED_MEMORY_MAGIC 0x53484D31u
+#define SHARED_MEMORY_MAGIC 0x53484D34u
 
 static int valid_memory(const shared_memory_t *memory)
 {
@@ -94,6 +96,28 @@ int shared_memory_create(shared_memory_t *memory, const char *name)
         shm_unlink(name);
         errno = saved_errno;
         return -1;
+    }
+
+    ipc_queue_t *queues[SHARED_NUM_NODES + 3];
+    for (int i = 0; i < SHARED_NUM_NODES; i++)
+        queues[i] = &data->commands[i];
+    queues[SHARED_NUM_NODES] = &data->responses;
+    queues[SHARED_NUM_NODES + 1] = &data->events;
+    queues[SHARED_NUM_NODES + 2] = &data->controls;
+    for (int i = 0; i < SHARED_NUM_NODES + 3; i++)
+    {
+        if (ipc_queue_init(queues[i]) < 0)
+        {
+            int saved_errno = errno;
+            while (i > 0)
+                ipc_queue_destroy(queues[--i]);
+            sem_destroy(&data->mutex);
+            munmap(data, memory->size);
+            close(fd);
+            shm_unlink(name);
+            errno = saved_errno;
+            return -1;
+        }
     }
 
     for (int i = 0; i < SHARED_NUM_NODES; i++)
@@ -200,6 +224,20 @@ int shared_memory_destroy(shared_memory_t *memory)
 
     int result = 0;
     int saved_errno = 0;
+    ipc_queue_t *queues[SHARED_NUM_NODES + 3];
+    for (int i = 0; i < SHARED_NUM_NODES; i++)
+        queues[i] = &memory->data->commands[i];
+    queues[SHARED_NUM_NODES] = &memory->data->responses;
+    queues[SHARED_NUM_NODES + 1] = &memory->data->events;
+    queues[SHARED_NUM_NODES + 2] = &memory->data->controls;
+    for (int i = 0; i < SHARED_NUM_NODES + 3; i++)
+    {
+        if (ipc_queue_destroy(queues[i]) < 0 && result == 0)
+        {
+            result = -1;
+            saved_errno = errno;
+        }
+    }
     if (sem_destroy(&memory->data->mutex) < 0)
     {
         result = -1;
@@ -393,29 +431,49 @@ int shared_memory_set_node_active(shared_memory_t *memory,
 }
 
 int shared_memory_record_tick_report(shared_memory_t *memory,
-                                     int node_id,
-                                     const msg_tick_report_t *report)
+                                     int node_id, const msg_tick_report_t *report)
 {
-    if (!valid_memory(memory) || report == NULL)
+    if (!valid_memory(memory) || !report)
     {
         errno = EINVAL;
         return -1;
     }
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
+        return -1;
     if (lock_memory(memory) < 0)
         return -1;
-
     shared_node_status_t *status = NULL;
     int result = get_node_status(memory, node_id, &status);
     if (result == 0)
     {
-        status->active = true;
-        status->last_tick = report->tick;
-        status->bad_frames = report->bad_frames;
-        status->missed_reports = 0;
+        uint32_t advance = report->tick - status->last_tick;
+        /* Un duplicado o un reloj reiniciado no oculta la perdida de reportes
+         * La resta sin signo permite el desbordamiento normal del tick. */
+        if (!status->last_report_ns || (advance > 0 && advance < UINT32_MAX / 2))
+        {
+            status->last_tick = report->tick;
+            status->bad_frames = report->bad_frames;
+            status->last_report_ns = (uint64_t)ts.tv_sec * 1000000000u + ts.tv_nsec;
+            status->missed_reports = 0;
+        }
     }
+    int unlocked = unlock_memory(memory);
+    return result == 0 ? unlocked : result;
+}
 
-    int unlock_result = unlock_memory(memory);
-    return result == 0 ? unlock_result : result;
+int shared_memory_set_missed_reports(shared_memory_t *memory, int node_id, uint32_t missed)
+{
+    if (!valid_memory(memory))
+        return -1;
+    if (lock_memory(memory) < 0)
+        return -1;
+    shared_node_status_t *status = NULL;
+    int result = get_node_status(memory, node_id, &status);
+    if (result == 0)
+        status->missed_reports = missed;
+    int unlocked = unlock_memory(memory);
+    return result == 0 ? unlocked : result;
 }
 
 int shared_memory_record_missed_report(shared_memory_t *memory, int node_id)
@@ -494,4 +552,72 @@ ring_buffer_t *shared_memory_tx_ring_buffer(shared_memory_t *memory,
         return NULL;
     }
     return &memory->data->tx_ring_buffers[node_id - 1];
+}
+
+static ipc_queue_t *select_queue(shared_memory_t *memory,
+                                 shared_queue_channel_t channel, int node_id)
+{
+    if (!valid_memory(memory))
+        return NULL;
+    if (channel == SHARED_QUEUE_COMMAND && node_id >= 1 && node_id <= SHARED_NUM_NODES)
+        return &memory->data->commands[node_id - 1];
+    if (channel == SHARED_QUEUE_RESPONSE && node_id == 0)
+        return &memory->data->responses;
+    if (channel == SHARED_QUEUE_EVENT && node_id == 0)
+        return &memory->data->events;
+    if (channel == SHARED_QUEUE_CONTROL && node_id == 0)
+        return &memory->data->controls;
+    errno = EINVAL;
+    return NULL;
+}
+
+int shared_memory_send(shared_memory_t *memory, shared_queue_channel_t channel,
+                       int node_id, const ipc_message_t *message, int timeout_ms)
+{
+    ipc_queue_t *queue = select_queue(memory, channel, node_id);
+    if (!queue)
+        return -1;
+    if (!message || message->node_id < 0 || message->node_id > SHARED_NUM_NODES ||
+        message->type < IPC_CALIBRATE || message->type > IPC_SHUTDOWN ||
+        (channel == SHARED_QUEUE_COMMAND && message->node_id != node_id))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    return ipc_queue_send(queue, message, timeout_ms);
+}
+
+int shared_memory_receive(shared_memory_t *memory, shared_queue_channel_t channel,
+                          int node_id, ipc_message_t *message, int timeout_ms)
+{
+    ipc_queue_t *queue = select_queue(memory, channel, node_id);
+    if (!queue)
+        return -1;
+    return ipc_queue_receive(queue, message, timeout_ms);
+}
+
+int shared_memory_write_startup(shared_memory_t *memory, const startup_status_t *status)
+{
+    if (!valid_memory(memory) || !status)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if (lock_memory(memory) < 0)
+        return -1;
+    memory->data->startup = *status;
+    return unlock_memory(memory);
+}
+
+int shared_memory_read_startup(shared_memory_t *memory, startup_status_t *status)
+{
+    if (!valid_memory(memory) || !status)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    if (lock_memory(memory) < 0)
+        return -1;
+    *status = memory->data->startup;
+    return unlock_memory(memory);
 }

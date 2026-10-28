@@ -13,4 +13,17 @@
  * indices de 16 bits de evq_t. */
 #define EVQ_CAPACIDAD 64u
 
+/* Duracion del tick hasta que el host manda la suya en 0x00, en ms. Antes de
+ * eso el temporizador solo sirve para despertar el lazo y atender el serial. */
+#define TICK_MS_DEFECTO 10u
+
+/* Tick mas largo admitido. Un tramo ocupa casi todo el tick sin ceder el
+ * control, y el watchdog del ESP8266 reinicia la placa a los ~3 s. La Pico
+ * usa el mismo limite para que las dos placas acepten la misma configuracion. */
+#define TICK_MS_MAX 2000u
+
+/* Ventana de debounce del boton de la esporadica: tras una pulsacion
+ * aceptada, los flancos que llegan antes de este tiempo son rebotes. */
+#define DEBOUNCE_MS 50u
+
 #endif

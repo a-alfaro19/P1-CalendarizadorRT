@@ -14,9 +14,9 @@ int task_cost_ticks(const Task *task, int speed_ut_per_tick)
 
     /*
      * Calcula ceil(W/s) usando enteros
-     * Ejemplo: W=41 y s=20 -> (41 + 19) / 20 = 3 ticks
+     * La división y el residuo evitan desbordar al sumar W + s - 1.
      */
-    return (task->work + speed_ut_per_tick - 1) / speed_ut_per_tick;
+    return task->work / speed_ut_per_tick + (task->work % speed_ut_per_tick != 0);
 }
 
 double task_utilization(const Task *task, int cost_ticks)
