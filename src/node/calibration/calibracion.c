@@ -1,4 +1,4 @@
-#include "calibracion.h"
+#include "node/calibration/calibracion.h"
 
 uint32_t calib_s_n(uint32_t ut_contadas, uint32_t us_medidos, uint32_t tick_us)
 {

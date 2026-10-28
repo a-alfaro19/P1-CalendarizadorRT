@@ -22,8 +22,4 @@
  * usa el mismo limite para que las dos placas acepten la misma configuracion. */
 #define TICK_MS_MAX 2000u
 
-/* Ventana de debounce del boton de la esporadica: tras una pulsacion
- * aceptada, los flancos que llegan antes de este tiempo son rebotes. */
-#define DEBOUNCE_MS 50u
-
 #endif

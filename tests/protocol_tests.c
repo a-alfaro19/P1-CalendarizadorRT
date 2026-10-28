@@ -210,16 +210,20 @@ static void test_event_roundtrip(void)
  */
 static void test_tick_report_roundtrip(void)
 {
-    uint8_t load[PROTOCOL_MAX_LOAD_SIZE];
-    msg_tick_report_t message = {0xAABBCCDD}, recovered;
+    uint8_t load[PROTOCOL_MAX_LOAD_SIZE] = {0};
+    msg_tick_report_t message = {.tick = 0xAABBCCDD}, recovered;
 
     int load_len = msg_tick_report_pack(&message, load, sizeof load);
+
     assert(load_len == 6);
-    assert(load[0] == 0xDD && load[1] == 0xCC && load[2] == 0xBB && load[3] == 0xAA);
+    assert(load[0] == 0xDD);
+    assert(load[1] == 0xCC);
+    assert(load[2] == 0xBB);
+    assert(load[3] == 0xAA);
+
     assert(msg_tick_report_unpack(load, (size_t)load_len, &recovered) == PROTOCOL_OK);
     assert(recovered.tick == 0xAABBCCDD);
 }
-
 /**
  * Case:     sporadic task trigger: a single uint8 (task_id = 7).
  * Expected: load = 07 (1 byte); same task_id recovered.
