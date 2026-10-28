@@ -7,8 +7,8 @@
 #include <stdio.h>
 #include <unity.h>
 
-#include "calibracion.h"
-#include "medicion.h"
+#include "node/calibration/calibracion.h"
+#include "node/measure/medicion.h"
 #include "test_harness.h"
 
 /* Duraciones de tick para las que se reporta s_n, en ms. */

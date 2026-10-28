@@ -2,7 +2,7 @@
 
 #include "test_harness.h"
 
-#include "calibracion.h"
+#include "node/calibration/calibracion.h"
 
 static void test_escala_la_medicion_al_tick_y_aplica_el_margen(void)
 {

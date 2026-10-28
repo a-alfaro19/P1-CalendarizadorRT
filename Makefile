@@ -101,13 +101,32 @@ $(BUILD_DIR)/$(TEST_DIR)/scheduler_runtime_tests $(BUILD_DIR)/$(TEST_DIR)/node_d
 	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< $(HOST_COMM_SRCS) $(SCHEDULER_SRCS) $(PROTOCOL_SRCS) -lm -pthread -o $@
 
 # La prueba de extremo a extremo ejecuta el binario del host real
-$(BUILD_DIR)/$(TEST_DIR)/host_e2e_tests: $(HOST_BIN)
+# End-to-end tests
+$(BUILD_DIR)/$(TEST_DIR)/host_e2e_tests: $(TEST_DIR)/host_e2e_tests.c $(HOST_BIN) $(LIB_PROTOCOL) $(HEADERS) $(TEST_DIR)/test_harness.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< -L$(LIB_DIR) -lprotocol -pthread -o $@
+
+# Protocol tests
+$(BUILD_DIR)/$(TEST_DIR)/protocol_tests: $(TEST_DIR)/protocol_tests.c $(LIB_PROTOCOL) $(HEADERS) $(TEST_DIR)/test_harness.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< -L$(LIB_DIR) -lprotocol -o $@
+
+# Ring buffer tests
+$(BUILD_DIR)/$(TEST_DIR)/ring_buffer_tests: $(TEST_DIR)/ring_buffer_tests.c src/host/ring_buffer.c $(HEADERS) $(TEST_DIR)/test_harness.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< src/host/ring_buffer.c -pthread -o $@	
+
+# Shared memory tests
+$(BUILD_DIR)/$(TEST_DIR)/shared_memory_tests: $(TEST_DIR)/shared_memory_tests.c src/host/shared_memory.c src/host/ipc_queue.c src/host/ring_buffer.c $(HEADERS) $(TEST_DIR)/test_harness.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< src/host/shared_memory.c src/host/ipc_queue.c src/host/ring_buffer.c -pthread -o $@
+
 
 # Generic compilation for any test
-$(BUILD_DIR)/$(TEST_DIR)/%: $(TEST_DIR)/%.c $(LIB_PROTOCOL) $(LIB_HOST_COMM) $(LIB_SCHEDULER) $(HEADERS)
+# Calibration tests
+$(BUILD_DIR)/$(TEST_DIR)/calibration_tests: $(TEST_DIR)/calibration_tests.c src/node/calibration/calibracion.c $(HEADERS) $(TEST_DIR)/test_harness.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< -L$(LIB_DIR) -lhost_comm -lscheduler -lprotocol -lm -pthread -o $@
-	
+	$(CC) $(CFLAGS) $(SANFLAGS) -Itests $< src/node/calibration/calibracion.c -o $@	
 $(BUILD_DIR)/$(TEST_DIR)/%/:
 	@mkdir -p $@
 
