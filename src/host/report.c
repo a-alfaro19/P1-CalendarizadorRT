@@ -24,10 +24,23 @@ static report_node_t *node_of(report_state_t *state, int node_id)
     return &state->nodes[node_id - 1];
 }
 
+/* Los últimos REPORT_LOG_RESERVE lugares de la línea de tiempo se guardan para
+ * eventos raros pero críticos (plazos perdidos, fallas, esporádicas ignoradas):
+ * en una corrida larga las liberaciones llenan el arreglo y esos eventos no
+ * pueden perderse. */
+#define REPORT_LOG_RESERVE 256
+
+static bool log_is_critical(report_log_kind_t kind)
+{
+    return kind == REPORT_LOG_MISS || kind == REPORT_LOG_NODE_DOWN ||
+           kind == REPORT_LOG_SPORADIC_IGNORED || kind == REPORT_LOG_BAD_FRAME;
+}
+
 static void log_add(report_state_t *state, uint32_t tick, int node_id, report_log_kind_t kind,
                     uint8_t task, uint16_t aux)
 {
-    if (state->log_count >= REPORT_MAX_LOG)
+    size_t capacity = log_is_critical(kind) ? REPORT_MAX_LOG : REPORT_MAX_LOG - REPORT_LOG_RESERVE;
+    if (state->log_count >= capacity)
     {
         state->log_dropped++;
         return;
@@ -96,6 +109,21 @@ static void consume_assignment(report_state_t *state, const ipc_message_t *messa
         d->accepted = accepted;
         d->confirmed = confirmed;
         snprintf(d->reason, sizeof(d->reason), "%.*s", IPC_REASON_LENGTH - 1, reason);
+
+        /* Si la tarea ya estaba en otro nodo, la decisión es una reubicación (o un
+         * rechazo tras la caída de su nodo) y el reporte debe decirlo. */
+        const report_task_t *before = &state->tasks[id];
+        if (before->used && before->accepted && before->node >= 1)
+        {
+            const report_node_t *old_node = node_of(state, before->node);
+            size_t len = strlen(d->reason);
+            if (accepted && before->node != message->node_id)
+                snprintf(d->reason + len, sizeof(d->reason) - len,
+                         " (reubicada desde el nodo %d)", before->node);
+            else if (!accepted && old_node && old_node->down)
+                snprintf(d->reason + len, sizeof(d->reason) - len,
+                         " (estaba en el nodo %d, caído)", before->node);
+        }
     }
     else
         state->decisions_dropped++;
@@ -122,6 +150,25 @@ static void consume_assignment(report_state_t *state, const ipc_message_t *messa
     recompute_utilization(state);
 }
 
+/* El nodo confirma sus tareas al desplegarlas, pero el planificador solo publica
+ * esa confirmación para las tareas manuales. Un evento real de la tarea en su
+ * nodo demuestra que está desplegada y en ejecución. */
+static void confirm_from_event(report_state_t *state, report_task_t *task, int task_id, int node_id)
+{
+    if (!task->accepted || task->confirmed || task->node != node_id)
+        return;
+    task->confirmed = true;
+    for (size_t k = state->decision_count; k-- > 0;)
+    {
+        report_decision_t *d = &state->decisions[k];
+        if (d->task_id != task_id || !d->accepted)
+            continue;
+        if (d->node == node_id)
+            d->confirmed = true;
+        return;
+    }
+}
+
 static void consume_event(report_state_t *state, const ipc_message_t *message)
 {
     report_node_t *node = node_of(state, message->node_id);
@@ -140,6 +187,7 @@ static void consume_event(report_state_t *state, const ipc_message_t *message)
             task->used = true;
             task->node = message->node_id;
         }
+        confirm_from_event(state, task, event->task_id, message->node_id);
     }
     switch (event->event_type)
     {
@@ -275,30 +323,26 @@ static void write_header(const report_state_t *state, FILE *out)
     fputc('\n', out);
 }
 
-static void write_gantt_node(const report_state_t *state, int index, FILE *out)
+/* Dibuja los ticks [from, limit) del nodo. Símbolos: # ejecuta, ^ liberación,
+ * @ liberación en un tick en que la tarea ya ejecuta, X plazo perdido. */
+static void write_gantt_range(const report_state_t *state, int index, uint32_t from, uint32_t limit,
+                              FILE *out)
 {
     const report_node_t *node = &state->nodes[index];
-    uint32_t limit = node->last_tick < REPORT_GANTT_TICKS ? node->last_tick : REPORT_GANTT_TICKS;
-    fprintf(out, "Nodo %d (%u ticks observados)\n", index + 1, node->last_tick);
-    if (node->last_tick > limit)
-        fprintf(out, "  [se muestran los primeros %u ticks; el CSV tiene todos los tramos]\n", limit);
-    if (limit == 0)
-    {
-        fprintf(out, "  (sin actividad registrada)\n\n");
-        return;
-    }
     bool row[REPORT_MAX_TASKS] = {0};
     for (int i = 0; i < REPORT_MAX_TASKS - 1; i++)
         if (state->tasks[i].used && state->tasks[i].accepted && state->tasks[i].node == index + 1)
             row[i] = true;
     for (size_t s = 0; s < node->segment_count; s++)
-        if (node->segments[s].task != TASK_NONE && node->segments[s].start < limit)
+        if (node->segments[s].task != TASK_NONE && node->segments[s].end > from &&
+            node->segments[s].start < limit)
             row[node->segments[s].task] = true;
 
-    for (uint32_t base = 0; base < limit; base += REPORT_GANTT_WIDTH)
+    for (uint32_t base = from; base < limit; base += REPORT_GANTT_WIDTH)
     {
         uint32_t stop = base + REPORT_GANTT_WIDTH < limit ? base + REPORT_GANTT_WIDTH : limit;
-        fprintf(out, "  ticks %u-%u   (# ejecuta, ^ liberación, X plazo perdido)\n", base, stop - 1);
+        fprintf(out, "  ticks %u-%u   (# ejecuta, ^ liberación, @ liberación y ejecución, X plazo perdido)\n",
+                base, stop - 1);
         for (int id = 0; id < REPORT_MAX_TASKS - 1; id++)
         {
             if (!row[id])
@@ -311,9 +355,9 @@ static void write_gantt_node(const report_state_t *state, int index, FILE *out)
                 const report_segment_t *seg = &node->segments[s];
                 if (seg->task != id || seg->end <= base || seg->start >= stop)
                     continue;
-                uint32_t from = seg->start > base ? seg->start : base;
-                uint32_t to = seg->end < stop ? seg->end : stop;
-                for (uint32_t t = from; t < to; t++)
+                uint32_t seg_from = seg->start > base ? seg->start : base;
+                uint32_t seg_to = seg->end < stop ? seg->end : stop;
+                for (uint32_t t = seg_from; t < seg_to; t++)
                     cells[t - base] = '#';
             }
             for (size_t l = 0; l < state->log_count; l++)
@@ -325,12 +369,46 @@ static void write_gantt_node(const report_state_t *state, int index, FILE *out)
                 char *cell = &cells[entry->tick - base];
                 if (entry->kind == REPORT_LOG_MISS)
                     *cell = 'X';
-                else if (entry->kind == REPORT_LOG_RELEASE && *cell == '.')
-                    *cell = '^';
+                else if (entry->kind == REPORT_LOG_RELEASE)
+                {
+                    if (*cell == '.')
+                        *cell = '^';
+                    else if (*cell == '#')
+                        *cell = '@';
+                }
             }
             fprintf(out, "  T%-3d |%s|\n", id, cells);
         }
     }
+}
+
+static void write_gantt_node(const report_state_t *state, int index, FILE *out)
+{
+    const report_node_t *node = &state->nodes[index];
+    fprintf(out, "Nodo %d (%u ticks observados)\n", index + 1, node->last_tick);
+    if (node->last_tick == 0)
+    {
+        fprintf(out, "  (sin actividad registrada)\n\n");
+        return;
+    }
+    uint32_t head = node->last_tick < REPORT_GANTT_TICKS ? node->last_tick : REPORT_GANTT_TICKS;
+    if (node->last_tick > head)
+        fprintf(out, "  [texto: primeros %u y últimos ticks; el SVG y el CSV tienen toda la ejecución]\n", head);
+    write_gantt_range(state, index, 0, head, out);
+    if (node->last_tick > head)
+    {
+        uint32_t tail = 2 * REPORT_GANTT_WIDTH;
+        uint32_t from = node->last_tick > tail ? node->last_tick - tail : 0;
+        if (from < head)
+            from = head;
+        if (from > head)
+            fprintf(out, "  ... ticks %u-%u omitidos en este texto ...\n", head, from - 1);
+        fprintf(out, "  [últimos ticks observados]\n");
+        write_gantt_range(state, index, from, node->last_tick, out);
+    }
+    if (node->down)
+        fprintf(out, "  >>> FALLA: nodo %d caído en el tick %u (%s)\n", index + 1, node->down_tick,
+                node->down_reason);
     fputc('\n', out);
 }
 
@@ -370,25 +448,82 @@ static void write_timeline(const report_state_t *state, FILE *out)
     fputc('\n', out);
 }
 
+#define REPORT_EXEC_LINES 150
+
+/* Tramos de ejecución por nodo, para que la sección 2 incluya también la ejecución. */
+static void write_execution(const report_state_t *state, FILE *out)
+{
+    fprintf(out, "Ejecución (tramos por nodo):\n");
+    bool any = false;
+    for (int i = 0; i < HOST_NODE_COUNT; i++)
+    {
+        const report_node_t *node = &state->nodes[i];
+        unsigned total = 0, printed = 0;
+        for (size_t s = 0; s < node->segment_count; s++)
+            if (node->segments[s].task != TASK_NONE)
+                total++;
+        if (!total)
+            continue;
+        any = true;
+        fprintf(out, "  Nodo %d:\n", i + 1);
+        for (size_t s = 0; s < node->segment_count && printed < REPORT_EXEC_LINES; s++)
+        {
+            const report_segment_t *seg = &node->segments[s];
+            if (seg->task == TASK_NONE)
+                continue;
+            fprintf(out, "    ticks %u-%u  ejecuta la tarea %u\n", seg->start, seg->end - 1, seg->task);
+            printed++;
+        }
+        if (total > printed)
+            fprintf(out, "    ... %u tramos más (ver el SVG o el CSV de Gantt)\n", total - printed);
+    }
+    if (!any)
+        fprintf(out, "  (sin ejecución registrada)\n");
+    fputc('\n', out);
+}
+
+/* Una tarea se reubicó si fue aceptada en más de un nodo. */
+static bool task_relocated(const report_state_t *state, int id)
+{
+    int first = 0;
+    for (size_t k = 0; k < state->decision_count; k++)
+    {
+        const report_decision_t *d = &state->decisions[k];
+        if (d->task_id != id || !d->accepted || d->node <= 0)
+            continue;
+        if (!first)
+            first = d->node;
+        else if (d->node != first)
+            return true;
+    }
+    return false;
+}
+
 static void write_task_stats(const report_state_t *state, FILE *out)
 {
     fprintf(out, "  id tipo nodo   C    T    D crit  lib compl perd ign  resp(min/prom/máx ticks)  prom ms\n");
-    bool any = false;
+    bool any = false, any_relocated = false;
     for (int i = 0; i < REPORT_MAX_TASKS - 1; i++)
     {
         const report_task_t *t = &state->tasks[i];
         if (!t->used)
             continue;
         any = true;
+        bool moved = task_relocated(state, i);
+        any_relocated = any_relocated || moved;
         double average = t->completions ? (double)t->response_sum / t->completions : 0.0;
-        fprintf(out, "  %2d  %c   %4d %3d %4d %4d %4d %4u %5u %4u %3u  %5u/%6.1f/%-5u  %10.1f\n",
-                i, t->kind == TASK_SPORADIC ? 'S' : 'P', t->node, t->cost, t->period, t->deadline,
+        fprintf(out, "  %2d  %c   %3d%c %3d %4d %4d %4d %4u %5u %4u %3u  %5u/%6.1f/%-5u  %10.1f\n",
+                i, t->kind == TASK_SPORADIC ? 'S' : 'P', t->node, moved ? '*' : ' ', t->cost, t->period, t->deadline,
                 t->criticality, t->releases, t->completions, t->misses, t->ignored,
                 t->response_min, average, t->response_max, average * state->tick_ms);
     }
     if (!any)
         fprintf(out, "  (sin tareas)\n");
-    fprintf(out, "  En las tareas esporádicas (S), la respuesta es la latencia desde la liberación hasta terminar.\n\n");
+    fprintf(out, "  En las tareas esporádicas (S), la respuesta es la latencia desde la liberación hasta terminar.\n");
+    if (any_relocated)
+        fprintf(out, "  * Tarea reubicada tras la caída de un nodo: sus estadísticas acumulan ambos nodos y\n"
+                     "    la columna nodo muestra el último. C es el costo en el nodo actual.\n");
+    fputc('\n', out);
 }
 
 static void write_utilization(const report_state_t *state, FILE *out)
@@ -399,9 +534,13 @@ static void write_utilization(const report_state_t *state, FILE *out)
         if (!n->last_tick && !n->theoretical_util && !n->speed_ut_per_tick)
             continue;
         double measured = n->last_tick ? (double)n->busy_ticks / n->last_tick * 100.0 : 0.0;
+        const char *note = "";
+        if (n->down)
+            note = n->last_tick < 100
+                       ? " [nodo caído: muestra demasiado corta, no representativa]"
+                       : " [nodo caído: valores hasta la falla]";
         fprintf(out, "  Nodo %d: teórica %.1f%% | medida %.1f%% (%u de %u ticks ocupados)%s\n",
-                i + 1, n->theoretical_util * 100.0, measured, n->busy_ticks, n->last_tick,
-                n->down ? " [nodo caído: valores hasta la falla]" : "");
+                i + 1, n->theoretical_util * 100.0, measured, n->busy_ticks, n->last_tick, note);
     }
     fprintf(out, "  La medida cubre hasta el último tick observado de cada nodo.\n\n");
 }
@@ -455,8 +594,9 @@ int report_write(const report_state_t *state, FILE *out)
     for (int i = 0; i < HOST_NODE_COUNT; i++)
         if (state->nodes[i].last_tick || state->nodes[i].segment_count)
             write_gantt_node(state, i, out);
-    fprintf(out, "2. LIBERACIONES, PLAZOS Y FALLAS\n--------------------------------\n");
+    fprintf(out, "2. LIBERACIONES, EJECUCIÓN, PLAZOS Y FALLAS\n-------------------------------------------\n");
     write_timeline(state, out);
+    write_execution(state, out);
     fprintf(out, "3. ESTADÍSTICAS POR TAREA\n-------------------------\n");
     write_task_stats(state, out);
     fprintf(out, "4. UTILIZACIÓN POR NODO\n-----------------------\n");
@@ -482,6 +622,118 @@ int report_write_gantt_csv(const report_state_t *state, int node_index, FILE *ou
         else
             fprintf(out, "%u,%u,%u\n", s->task, s->start, s->end);
     }
+    return ferror(out) ? -1 : 0;
+}
+
+/* Diagrama de Gantt completo de un nodo en SVG (se abre en cualquier navegador).
+ * Cada tarea tiene una fila; los tramos de ejecución son rectángulos. Marcas:
+ * triángulo = liberación, X roja = plazo perdido, círculo naranja = esporádica
+ * ignorada, línea roja discontinua = nodo caído. */
+static int report_write_gantt_svg(const report_state_t *state, int node_index, FILE *out)
+{
+    if (node_index < 0 || node_index >= HOST_NODE_COUNT)
+        return -1;
+    const report_node_t *node = &state->nodes[node_index];
+    const int node_id = node_index + 1;
+    const int left = 70, top = 46, row_h = 24;
+
+    int row_of[REPORT_MAX_TASKS];
+    int rows = 0;
+    for (int i = 0; i < REPORT_MAX_TASKS; i++)
+        row_of[i] = -1;
+    for (int i = 0; i < REPORT_MAX_TASKS - 1; i++)
+        if (state->tasks[i].used && state->tasks[i].accepted && state->tasks[i].node == node_id)
+            row_of[i] = 0;
+    for (size_t s = 0; s < node->segment_count; s++)
+        if (node->segments[s].task != TASK_NONE)
+            row_of[node->segments[s].task] = 0;
+    for (size_t l = 0; l < state->log_count; l++)
+        if (state->log[l].node == node_id && state->log[l].task != TASK_NONE)
+            row_of[state->log[l].task] = 0;
+    for (int i = 0; i < REPORT_MAX_TASKS; i++)
+        if (row_of[i] == 0)
+            row_of[i] = rows++;
+
+    uint32_t total = node->last_tick ? node->last_tick : 1;
+    double px = total <= 1000 ? 4.0 : (total <= 4000 ? 2.0 : 1.0);
+    int width = left + (int)(total * px) + 30;
+    int height = top + rows * row_h + 60;
+    uint32_t step = (uint32_t)(50.0 / px / 10.0 + 0.999) * 10;
+    if (step < 10)
+        step = 10;
+
+    fprintf(out, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\" "
+                 "viewBox=\"0 0 %d %d\" font-family=\"sans-serif\" font-size=\"11\">\n",
+            width, height, width, height);
+    fprintf(out, "<rect width=\"%d\" height=\"%d\" fill=\"#ffffff\"/>\n", width, height);
+    fprintf(out, "<text x=\"%d\" y=\"18\" font-size=\"14\" font-weight=\"bold\">Nodo %d - %s, %s, "
+                 "%u ticks observados (tick = %d ms)</text>\n",
+            left, node_id, algorithm_name(state->algorithm), heuristic_name(state->heuristic),
+            node->last_tick, state->tick_ms);
+
+    for (uint32_t t = 0; t <= total; t += step)
+    {
+        double x = left + t * px;
+        fprintf(out, "<line x1=\"%.1f\" y1=\"%d\" x2=\"%.1f\" y2=\"%d\" stroke=\"#dddddd\"/>\n", x,
+                top - 6, x, top + rows * row_h);
+        fprintf(out, "<text x=\"%.1f\" y=\"%d\" text-anchor=\"middle\" fill=\"#555555\">%u</text>\n", x,
+                top - 10, t);
+    }
+    for (int id = 0; id < REPORT_MAX_TASKS; id++)
+    {
+        if (row_of[id] < 0)
+            continue;
+        int y = top + row_of[id] * row_h;
+        fprintf(out, "<line x1=\"%d\" y1=\"%d\" x2=\"%.1f\" y2=\"%d\" stroke=\"#eeeeee\"/>\n", left,
+                y + row_h, left + total * px, y + row_h);
+        fprintf(out, "<text x=\"%d\" y=\"%d\" text-anchor=\"end\">T%d%s</text>\n", left - 8,
+                y + row_h / 2 + 4, id,
+                state->tasks[id].kind == TASK_SPORADIC && state->tasks[id].used ? " (S)" : "");
+    }
+    for (size_t s = 0; s < node->segment_count; s++)
+    {
+        const report_segment_t *seg = &node->segments[s];
+        if (seg->task == TASK_NONE || row_of[seg->task] < 0)
+            continue;
+        fprintf(out, "<rect x=\"%.1f\" y=\"%d\" width=\"%.1f\" height=\"%d\" fill=\"hsl(%d,65%%,52%%)\">"
+                     "<title>T%u: ticks %u-%u</title></rect>\n",
+                left + seg->start * px, top + row_of[seg->task] * row_h + 4,
+                (seg->end - seg->start) * px, row_h - 8, (seg->task * 47) % 360, seg->task,
+                seg->start, seg->end - 1);
+    }
+    for (size_t l = 0; l < state->log_count; l++)
+    {
+        const report_log_t *e = &state->log[l];
+        if (e->node != node_id || e->task == TASK_NONE || row_of[e->task] < 0)
+            continue;
+        double x = left + e->tick * px;
+        int y = top + row_of[e->task] * row_h;
+        if (e->kind == REPORT_LOG_RELEASE)
+            fprintf(out, "<polygon points=\"%.1f,%d %.1f,%d %.1f,%d\" fill=\"#222222\"/>\n", x, y + 9,
+                    x - 3, y + 1, x + 3, y + 1);
+        else if (e->kind == REPORT_LOG_MISS)
+            fprintf(out, "<path d=\"M%.1f %dL%.1f %dM%.1f %dL%.1f %d\" stroke=\"#d00000\" "
+                         "stroke-width=\"2\"/>\n",
+                    x - 4, y + 6, x + 4, y + row_h - 6, x + 4, y + 6, x - 4, y + row_h - 6);
+        else if (e->kind == REPORT_LOG_SPORADIC_IGNORED)
+            fprintf(out, "<circle cx=\"%.1f\" cy=\"%d\" r=\"4\" fill=\"#ff9800\"/>\n", x,
+                    y + row_h / 2);
+    }
+    if (node->down)
+    {
+        double x = left + node->down_tick * px;
+        fprintf(out, "<line x1=\"%.1f\" y1=\"%d\" x2=\"%.1f\" y2=\"%d\" stroke=\"#d00000\" "
+                     "stroke-width=\"2\" stroke-dasharray=\"5,3\"/>\n",
+                x, top - 6, x, top + rows * row_h);
+        fprintf(out, "<text x=\"%.1f\" y=\"%d\" fill=\"#d00000\" font-weight=\"bold\">nodo caído "
+                     "(tick %u)</text>\n",
+                x + 4, top + rows * row_h + 14, node->down_tick);
+    }
+    fprintf(out, "<text x=\"%d\" y=\"%d\" fill=\"#333333\">Leyenda: rectángulo = ejecución | triángulo "
+                 "negro = liberación | X roja = plazo perdido | círculo naranja = esporádica "
+                 "ignorada | línea roja = nodo caído</text>\n",
+            left, height - 10);
+    fprintf(out, "</svg>\n");
     return ferror(out) ? -1 : 0;
 }
 
@@ -654,14 +906,30 @@ static int save_report(const report_state_t *state, const char *directory)
         int csv = report_write_gantt_csv(state, i, out);
         if (fclose(out) != 0 || csv < 0)
             result = -1;
+
+        snprintf(path, sizeof(path), "%s/gantt_nodo%d_%s.svg", directory, i + 1, stamp);
+        out = fopen(path, "w");
+        if (!out)
+        {
+            perror("[Reporte] No se pudo abrir el SVG de Gantt");
+            result = -1;
+            continue;
+        }
+        int svg = report_write_gantt_svg(state, i, out);
+        if (fclose(out) != 0 || svg < 0)
+            result = -1;
     }
     for (int i = 0; i < HOST_NODE_COUNT; i++)
     {
         const report_node_t *n = &state->nodes[i];
-        if (n->last_tick)
-            printf("[Reporte] Nodo %d: utilización teórica %.1f%%, medida %.1f%%, %u cambios de tarea%s\n",
-                   i + 1, n->theoretical_util * 100.0, (double)n->busy_ticks / n->last_tick * 100.0,
-                   n->switches, n->down ? " (nodo caído)" : "");
+        if (!n->last_tick)
+            continue;
+        const char *note = "";
+        if (n->down)
+            note = n->last_tick < 100 ? " (nodo caído: muestra corta)" : " (nodo caído)";
+        printf("[Reporte] Nodo %d: utilización teórica %.1f%%, medida %.1f%%, %u cambios de tarea%s\n",
+               i + 1, n->theoretical_util * 100.0, (double)n->busy_ticks / n->last_tick * 100.0,
+               n->switches, note);
     }
     return result;
 }

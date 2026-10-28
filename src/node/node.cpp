@@ -1,3 +1,19 @@
+// node.cpp - Capa de placa del nodo para ESP8266 (NodeMCU) y Raspberry Pi Pico W.
+//
+// El protocolo viaja por el puerto USB de la placa (objeto `Serial`), por lo que
+// NO debe imprimirse nada de depuracion por Serial: contaminaria el canal binario.
+//
+// Hardware que refleja el nodo:
+//   - 4 LEDs (bit0..bit3) con decision.leds_tarea (0 = ocioso, 1..15 = tarea).
+//   - 1 LED de plazo perdido (decision.led_plazo).
+//   - 1 boton (a GND, pull-up interno) que libera la tarea esporadica.
+//   - 1 pin de sincronizacion que conmuta en cada reporte de tick (incluido el
+//     tick 0): sirve para medir con analizador logico el desfase entre nodos.
+//
+// El tick lo genera un temporizador de hardware (timer1 en el ESP8266, un
+// repeating timer en la Pico). Su ISR solo cuenta ticks; el driver toma el
+// tiempo de ese contador y loop() duerme entre interrupciones, sin busy waiting.
+
 #include <Arduino.h>
 
 #if defined(ARDUINO_ARCH_RP2040)
@@ -5,7 +21,6 @@
 #include <pico/time.h>
 #endif
 
-#include "node/button/rebote.h"
 #include "node/measure/medicion.h"
 #include "node/node_driver.h"
 
@@ -13,49 +28,63 @@ extern "C" {
 #include "node/ut/ut.h"
 }
 
-/* Solo el ESP8266 necesita las ISR en IRAM. */
 #ifndef IRAM_ATTR
 #define IRAM_ATTR
 #endif
 
-namespace
-{
-/* Tarea en ejecucion en binario (bit 0 primero, 0 = idle), LED de plazo y
- * boton de la esporadica (a GND, con pull-up). */
+// ---------------------------------------------------------------------------
+// Pines
+// ---------------------------------------------------------------------------
 #if defined(ARDUINO_ARCH_ESP8266)
-/* D3, D4 y D8 deciden el modo de arranque; RX/TX son el serial con el host.
- * D3 ya tiene el boton FLASH de la placa, con pull-up. */
-const uint8_t task_led_pins[] = {D1, D2, D5, D6};
-const uint8_t deadline_led_pin = D7;
-const uint8_t button_pin = D3;
-/* timer1 cuenta a 80 MHz / 256 = 312.5 kHz: 3125 cuentas son 10 ms. */
-const uint32_t timer1_counts_per_10_ms = 3125u;
+// NodeMCU: D1, D2, D5, D6 / D7 / D3 (GPIO0) / D0 (GPIO16)
+static const uint8_t PIN_TASK_LEDS[4] = {5, 4, 14, 12};
+static const uint8_t PIN_MISS_LED = 13;
+static const uint8_t PIN_BUTTON = 0;
+static const uint8_t PIN_SYNC = 16;
 #elif defined(ARDUINO_ARCH_RP2040)
-/* GP0 y GP1 son el UART con el host. */
-const uint8_t task_led_pins[] = {2, 3, 4, 5};
-const uint8_t deadline_led_pin = 6;
-const uint8_t button_pin = 15;
+// Pico W: GP2..GP5 / GP6 / GP14 / GP15
+static const uint8_t PIN_TASK_LEDS[4] = {2, 3, 4, 5};
+static const uint8_t PIN_MISS_LED = 6;
+static const uint8_t PIN_BUTTON = 14;
+static const uint8_t PIN_SYNC = 15;
 #else
-#error "Placa sin pines de LEDs definidos"
+// Respaldo para el entorno esp32 del platformio.ini
+static const uint8_t PIN_TASK_LEDS[4] = {25, 26, 27, 14};
+static const uint8_t PIN_MISS_LED = 13;
+static const uint8_t PIN_BUTTON = 32;
+static const uint8_t PIN_SYNC = 33;
 #endif
 
+static const uint32_t DEBOUNCE_US = 50000u; // antirrebote por software (50 ms)
+
+#if defined(ARDUINO_ARCH_ESP8266)
+// timer1 cuenta a 80 MHz / 256 = 312.5 kHz: 3125 cuentas son 10 ms.
+static const uint32_t TIMER1_COUNTS_PER_10_MS = 3125u;
+#endif
+
+namespace
+{
 node_driver_t driver;
 
-/* La ISR del temporizador solo cuenta ticks (y en el ESP8266 reanuda loop()).
- * El driver toma el tiempo de ese contador en board_now_us, asi que ejecuta un
- * tick del calendarizador por cada interrupcion, sin sondear micros(). */
-volatile uint32_t generated_ticks;
-uint32_t tick_period_us;
+// La ISR solo cuenta pulsaciones; el calendarizador las atiende en su tick.
+volatile uint8_t button_events = 0;
+volatile uint32_t last_press_us = 0;
+bool sync_state = false;
+
+// Ticks generados por la ISR del temporizador. board_now_us los convierte a
+// microsegundos, asi el driver corre un tick del calendarizador por interrupcion.
+volatile uint32_t generated_ticks = 0;
+uint32_t tick_period_us = 0;
 
 #if defined(ARDUINO_ARCH_ESP8266)
 void IRAM_ATTR on_tick()
 {
     generated_ticks++;
-    esp_schedule();
+    esp_schedule(); // reanuda loop() si esta en esp_suspend()
 }
 #elif defined(ARDUINO_ARCH_RP2040)
 repeating_timer_t tick_timer;
-bool tick_timer_active;
+bool tick_timer_active = false;
 
 bool on_tick(repeating_timer_t *)
 {
@@ -64,10 +93,10 @@ bool on_tick(repeating_timer_t *)
 }
 #endif
 
-/* Arma el temporizador con un tick de tick_ms y reinicia el contador. Solo
- * ocurre antes de 0x03 (el driver rechaza 0x00 ya iniciado), asi que el reloj
- * del driver no cambia de escala con la ejecucion en marcha. Devuelve false,
- * sin tocar el temporizador, si la duracion no se admite. */
+// Arma el temporizador con un tick de tick_ms y reinicia el contador. Solo
+// ocurre antes de 0x03 (el driver rechaza 0x00 ya iniciado), asi el reloj del
+// driver no cambia de escala con la ejecucion en marcha. Devuelve false, sin
+// tocar el temporizador, si la duracion no se admite.
 bool configure_tick(uint16_t tick_ms)
 {
     if (tick_ms == 0 || tick_ms > TICK_MS_MAX)
@@ -79,38 +108,40 @@ bool configure_tick(uint16_t tick_ms)
     tick_period_us = (uint32_t)tick_ms * 1000u;
     timer1_attachInterrupt(on_tick);
     timer1_enable(TIM_DIV256, TIM_EDGE, TIM_LOOP);
-    timer1_write((uint32_t)tick_ms * timer1_counts_per_10_ms / 10u);
+    timer1_write((uint32_t)tick_ms * TIMER1_COUNTS_PER_10_MS / 10u);
     return true;
 #elif defined(ARDUINO_ARCH_RP2040)
     if (tick_timer_active)
         cancel_repeating_timer(&tick_timer);
     generated_ticks = 0;
     tick_period_us = (uint32_t)tick_ms * 1000u;
-    /* Retardo negativo: el periodo se cuenta desde el inicio del callback
-     * anterior, asi el tick no acumula la duracion de la ISR. */
+    // Retardo negativo: el periodo se cuenta desde el inicio del callback
+    // anterior, asi el tick no acumula la duracion de la ISR.
     tick_timer_active = add_repeating_timer_ms(-(int32_t)tick_ms, on_tick, NULL, &tick_timer);
     return tick_timer_active;
+#else
+#error "Placa sin temporizador de tick"
 #endif
 }
 
-/* Duerme hasta la siguiente interrupcion si desde seen_ticks no llego ningun
- * tick y no hay bytes del host por leer. Puede volver por otra interrupcion:
- * loop() vuelve a revisar. */
+// Duerme hasta la siguiente interrupcion si desde seen_ticks no llego ningun
+// tick y no hay bytes del host por leer. Puede volver por otra interrupcion:
+// loop() vuelve a revisar.
 void wait_for_interrupt(uint32_t seen_ticks)
 {
+    if (Serial.available() > 0)
+        return;
 #if defined(ARDUINO_ARCH_ESP8266)
-    /* Si la ISR llega entre la comparacion y esp_suspend(), su esp_schedule()
-     * ya dejo el aviso y esp_suspend() vuelve enseguida. El UART no reanuda
-     * loop(): los bytes que lleguen mientras duerme esperan en el bufer de
-     * recepcion hasta el siguiente tick. */
-    if (generated_ticks == seen_ticks && Serial.available() <= 0)
+    // Si la ISR llega entre la comparacion y esp_suspend(), su esp_schedule()
+    // ya dejo el aviso y esp_suspend() vuelve enseguida. El UART no reanuda
+    // loop(): los bytes que lleguen mientras duerme esperan en el buffer de
+    // recepcion hasta el siguiente tick.
+    if (generated_ticks == seen_ticks)
         esp_suspend();
 #elif defined(ARDUINO_ARCH_RP2040)
-    if (Serial1.available() > 0)
-        return;
-    /* Con las interrupciones deshabilitadas, una que llegue entre la
-     * comparacion y __wfi() queda pendiente y despierta al nucleo. El byte
-     * del host que llegue despues de available() tambien. */
+    // Con las interrupciones deshabilitadas, una que llegue entre la
+    // comparacion y __wfi() queda pendiente y despierta al nucleo. La del USB
+    // tambien, asi que un byte del host no espera al siguiente tick.
     uint32_t state = save_and_disable_interrupts();
     if (generated_ticks == seen_ticks)
         __wfi();
@@ -118,54 +149,37 @@ void wait_for_interrupt(uint32_t seen_ticks)
 #endif
 }
 
-/* La ISR solo cuenta pulsaciones; loop() las pasa al calendarizador. Asi el
- * boton y el mensaje 0x06 registran disparos desde un solo contexto, como
- * pide sched_registrar_disparo. */
-volatile uint32_t button_presses;
-uint32_t forwarded_presses;
-rebote_t button_debounce;
-
-void IRAM_ATTR on_button_press()
+void IRAM_ATTR on_button_falling()
 {
-    if (rebote_aceptar(&button_debounce, millis()))
-        button_presses++;
-}
-
-void forward_button_presses()
-{
-    uint32_t presses = button_presses;
-    for (; forwarded_presses != presses; forwarded_presses++)
-        sched_registrar_disparo(&driver.scheduler);
+    uint32_t now = micros();
+    if ((uint32_t)(now - last_press_us) < DEBOUNCE_US)
+        return;
+    last_press_us = now;
+    if (button_events < 255)
+        button_events++;
 }
 
 int read_serial_byte(void *, uint8_t *byte)
 {
-#if defined(ARDUINO_ARCH_ESP8266)
     if (Serial.available() <= 0)
-#else
-    if (Serial1.available() <= 0)
-#endif
         return 0;
-
-#if defined(ARDUINO_ARCH_ESP8266)
     int received = Serial.read();
-#else
-    int received = Serial1.read();
-#endif
     if (received < 0)
         return -1;
-
     *byte = static_cast<uint8_t>(received);
     return 1;
 }
 
+// Mejor esfuerzo: si no hay host (o el buffer de salida esta lleno) la trama se
+// descarta y el nodo sigue ejecutando sus tareas. Nunca bloquea dentro del tick.
 int write_serial_bytes(void *, const uint8_t *bytes, size_t length)
 {
-#if defined(ARDUINO_ARCH_ESP8266)
-    return Serial.write(bytes, length) == length ? 0 : -1;
-#else
-    return Serial1.write(bytes, length) == length ? 0 : -1;
+#if !defined(ARDUINO_ARCH_RP2040)
+    if (static_cast<size_t>(Serial.availableForWrite()) < length)
+        return 0;
 #endif
+    Serial.write(bytes, length);
+    return 0;
 }
 
 uint32_t board_now_us(void *)
@@ -185,39 +199,62 @@ void board_run_unit(void *)
     unidad_trabajo();
 }
 
-void show_leds(uint8_t task_leds, bool deadline_missed)
-{
-    for (size_t i = 0; i < sizeof task_led_pins; i++)
-        digitalWrite(task_led_pins[i], (task_leds >> i) & 1u ? HIGH : LOW);
-    digitalWrite(deadline_led_pin, deadline_missed ? HIGH : LOW);
-}
-
 void board_apply_decision(void *, const decision_t *decision)
 {
-    show_leds(decision->leds_tarea, decision->led_plazo);
+    uint8_t value = decision->leds_tarea;
+    for (uint8_t bit = 0; bit < 4; bit++)
+        digitalWrite(PIN_TASK_LEDS[bit], (value >> bit) & 1u ? HIGH : LOW);
+    digitalWrite(PIN_MISS_LED, decision->led_plazo ? HIGH : LOW);
+
+    if (decision->reporte_tick)
+    {
+        sync_state = !sync_state;
+        digitalWrite(PIN_SYNC, sync_state ? HIGH : LOW);
+    }
 }
+
+// Parpadeo del LED de plazo perdido para indicar un fallo irrecuperable de arranque.
+[[noreturn]] void fatal_blink()
+{
+    for (;;)
+    {
+        digitalWrite(PIN_MISS_LED, HIGH);
+        delay(150);
+        digitalWrite(PIN_MISS_LED, LOW);
+        delay(150);
+    }
 }
+
+void drain_button_events()
+{
+    noInterrupts();
+    uint8_t pending = button_events;
+    button_events = 0;
+    interrupts();
+    while (pending--)
+        sched_registrar_disparo(&driver.scheduler);
+}
+} // namespace
 
 void setup()
 {
-    Serial.begin(115200);
-    for (uint8_t pin : task_led_pins)
-        pinMode(pin, OUTPUT);
-    pinMode(deadline_led_pin, OUTPUT);
-    show_leds(0, false);
-    pinMode(button_pin, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(button_pin), on_button_press, FALLING);
+    for (uint8_t bit = 0; bit < 4; bit++)
+    {
+        pinMode(PIN_TASK_LEDS[bit], OUTPUT);
+        digitalWrite(PIN_TASK_LEDS[bit], LOW);
+    }
+    pinMode(PIN_MISS_LED, OUTPUT);
+    digitalWrite(PIN_MISS_LED, LOW);
+    pinMode(PIN_SYNC, OUTPUT);
+    digitalWrite(PIN_SYNC, LOW);
 
-#if defined(ARDUINO_ARCH_ESP32)
-    Serial1.begin(115200, SERIAL_8N1, 16, 17);
-#elif defined(ARDUINO_ARCH_ESP8266)
+    pinMode(PIN_BUTTON, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), on_button_falling, FALLING);
+
     Serial.begin(115200);
-#elif defined(ARDUINO_ARCH_RP2040)
-    Serial1.setRX(1);
-    Serial1.setTX(0);
-    Serial1.begin(115200);
-#else
-    Serial1.begin(115200);
+#if defined(ARDUINO_ARCH_RP2040)
+    // USB CDC: no esperar a que el host asevere DTR para poder transmitir.
+    Serial.ignoreFlowControl(true);
 #endif
 
     node_driver_io_t io = {};
@@ -228,27 +265,16 @@ void setup()
     io.run_unit = board_run_unit;
     io.apply_decision = board_apply_decision;
 
+    // Hasta que llegue 0x00 el tick por defecto solo despierta el lazo.
     if (node_driver_init(&driver, &io) != 0 || !configure_tick(TICK_MS_DEFECTO))
-    {
-#if !defined(ARDUINO_ARCH_ESP8266)
-        Serial.println("Node driver initialization failed");
-#endif
-        while (true)
-            delay(1000);
-    }
+        fatal_blink();
 }
 
 void loop()
 {
     uint32_t seen_ticks = generated_ticks;
-    forward_button_presses();
+    drain_button_events();
     if (node_driver_poll(&driver) != 0)
-    {
-#if !defined(ARDUINO_ARCH_ESP8266)
-        Serial.println("Node driver I/O error");
-#endif
-        while (true)
-            delay(1000);
-    }
+        fatal_blink();
     wait_for_interrupt(seen_ticks);
 }

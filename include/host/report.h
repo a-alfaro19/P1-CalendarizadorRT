@@ -10,7 +10,7 @@
 /* Max de tramos de Gantt por nodo; las estadisticas siguen exactas si se llena */
 #define REPORT_MAX_SEGMENTS 8192
 /* Max de la linea de tiempo y de decisiones de admision, se conservan las primeras */
-#define REPORT_MAX_LOG 4096
+#define REPORT_MAX_LOG 32768
 #define REPORT_MAX_DECISIONS 256
 /* Ventana del Gantt en texto, el CSV contiene todos los tramos almacenados */
 #define REPORT_GANTT_TICKS 400
