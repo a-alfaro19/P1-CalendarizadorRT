@@ -117,7 +117,7 @@ static void consume_assignment(report_state_t *state, const ipc_message_t *messa
         {
             const report_node_t *old_node = node_of(state, before->node);
             size_t len = strlen(d->reason);
-            if (accepted && before->node != message->node_id)
+            if (accepted && before->node != message->node_id && !strstr(d->reason, "eubic"))
                 snprintf(d->reason + len, sizeof(d->reason) - len,
                          " (reubicada desde el nodo %d)", before->node);
             else if (!accepted && old_node && old_node->down)
@@ -166,6 +166,28 @@ static void confirm_from_event(report_state_t *state, report_task_t *task, int t
         if (d->node == node_id)
             d->confirmed = true;
         return;
+    }
+}
+
+/* Cuando el arranque termina, un nodo con todas sus tareas confirmadas (p. ej. 5/5)
+ * tiene desplegadas incluso las que aún no han producido eventos, como la esporádica. */
+static void confirm_deployed(report_state_t *state)
+{
+    for (int n = 0; n < HOST_NODE_COUNT && n < state->startup.node_count; n++)
+    {
+        if (!state->startup.nodes[n].planned_tasks ||
+            state->startup.nodes[n].confirmed_tasks != state->startup.nodes[n].planned_tasks)
+            continue;
+        for (size_t k = 0; k < state->decision_count; k++)
+        {
+            report_decision_t *d = &state->decisions[k];
+            if (!d->accepted || d->confirmed || d->node != n + 1)
+                continue;
+            d->confirmed = true;
+            if (d->task_id >= 0 && d->task_id < REPORT_MAX_TASKS - 1 &&
+                state->tasks[d->task_id].node == n + 1)
+                state->tasks[d->task_id].confirmed = true;
+        }
     }
 }
 
@@ -240,6 +262,8 @@ void report_consume(report_state_t *state, const ipc_message_t *message)
         state->have_startup = true;
         for (int i = 0; i < HOST_NODE_COUNT; i++)
             state->nodes[i].speed_ut_per_tick = state->startup.nodes[i].speed_ut_per_tick;
+        if (state->startup.phase == STARTUP_RUNNING)
+            confirm_deployed(state);
         break;
     case IPC_ASSIGNMENT:
         consume_assignment(state, message);
@@ -399,6 +423,7 @@ static void write_gantt_node(const report_state_t *state, int index, FILE *out)
     {
         uint32_t tail = 2 * REPORT_GANTT_WIDTH;
         uint32_t from = node->last_tick > tail ? node->last_tick - tail : 0;
+        from = (from / REPORT_GANTT_WIDTH) * REPORT_GANTT_WIDTH;
         if (from < head)
             from = head;
         if (from > head)
